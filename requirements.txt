@@ -1,0 +1,13 @@
+requests>=2.20
+azure-identity>=1.12
+azure-mgmt-resource>=22.0.0
+azure-mgmt-compute>=27.0.0
+azure-mgmt-costmanagement>=3.0.0
+azure-mgmt-network>=21.0.0
+azure-mgmt-web>=7.0.0
+azure-mgmt-monitor>=5.0.0
+# azure-mgmt-sql>=4.0.0 # Version 4+ seems to be beta
+azure-mgmt-sql>=3.0.0,<4.0.0
+pandas>=1.0
+rich>=13.0 # For enhanced terminal output
+# tabulate>=0.8 # Optional, for pretty console tables - Replaced by rich 

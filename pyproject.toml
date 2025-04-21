@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "azure-cost-advisor"
+version = "0.1.0"
+authors = [
+  { name="Your Name", email="you@example.com" }, # TODO: Update with actual author info
+]
+description = "A tool to analyze Azure resources for cost optimization."
+readme = "README.md" # Assuming you have or will create a README.md
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License", # TODO: Choose appropriate license
+    "Operating System :: OS Independent",
+]
+# Add dependencies based on your requirements.txt or imports
+# Example:
+dependencies = [
+    "azure-identity",
+    "azure-mgmt-resource",
+    "azure-mgmt-compute",
+    "azure-mgmt-network",
+    "azure-mgmt-web",
+    "azure-mgmt-monitor",
+    "azure-mgmt-sql",
+    "azure-mgmt-costmanagement",
+    "pandas",
+    "rich",
+    "requests",
+    "azure-mgmt-resourcegraph" # Add Resource Graph SDK
+]
+
+[project.scripts]
+cost-optimizer = "cost_optimizer:main" # Makes 'cost-optimizer' runnable after install
+
+[tool.setuptools.packages.find]
+where = ["."]  # look for packages in the current directory
+include = ["azure_cost_advisor*"]  # Include the main package
+# exclude = ["tests"] # Optionally exclude tests from the installed package
+
+[tool.pytest.ini_options]
+pythonpath = [
+  "." # Add project root to pytest's python path
+]
+testpaths = [
+    "tests",
+] 
