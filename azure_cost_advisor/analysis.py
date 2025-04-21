@@ -201,13 +201,15 @@ def find_stopped_vms(credential, subscription_id, console: Console):
         compute_client = ComputeManagementClient(credential, subscription_id)
         vm_list = list(compute_client.virtual_machines.list_all())
         for vm in vm_list:
+            rg_name = None
             try:
                 # Extract RG name safely
                 try:
-                     rg_name = vm.id.split('/')[4]
+                    rg_name = vm.id.split('/')[4]
                 except IndexError:
-                     console.print(f"  [yellow]Warning:[/][dim] Could not parse resource group for VM {vm.name}. Skipping.[/]")
-                     continue
+                    logger.warning(f"Could not parse resource group for VM {vm.name}. Skipping.")
+                    console.print(f"  [yellow]Warning:[/][dim] Could not parse resource group for VM {vm.name}. Skipping.[/]")
+                    continue
 
                 instance_view = compute_client.virtual_machines.instance_view(
                     resource_group_name=rg_name,
@@ -221,15 +223,68 @@ def find_stopped_vms(credential, subscription_id, console: Console):
                             break
                 # Check if the power state is specifically 'stopped' (not 'deallocated')
                 if power_state == "stopped":
-                    stopped_vms.append({
-                        "name": vm.name, 
-                        "id": vm.id, 
+                    vm_details = {
+                        "name": vm.name,
+                        "id": vm.id,
                         "resource_group": rg_name,
-                        "location": vm.location
-                    })
+                        "location": vm.location,
+                        "disks": [] # Initialize list for disk details
+                    }
+
+                    # --- Get Disk Details --- 
+                    disk_info_list = []
+                    if vm.storage_profile:
+                         # Get OS Disk details
+                         if vm.storage_profile.os_disk and vm.storage_profile.os_disk.managed_disk:
+                             try:
+                                 os_disk_name = vm.storage_profile.os_disk.name
+                                 os_disk_id = vm.storage_profile.os_disk.managed_disk.id
+                                 os_disk_gb = vm.storage_profile.os_disk.disk_size_gb
+                                 # Get the full disk resource to find SKU and location
+                                 disk_resource = compute_client.disks.get(rg_name, os_disk_name)
+                                 os_disk_sku = disk_resource.sku.name if disk_resource.sku else 'Unknown'
+                                 os_disk_location = disk_resource.location
+                                 disk_info_list.append({
+                                     'name': os_disk_name,
+                                     'size_gb': os_disk_gb,
+                                     'sku': os_disk_sku,
+                                     'location': os_disk_location, # Use actual disk location
+                                     'id': os_disk_id
+                                 })
+                             except Exception as disk_err:
+                                 logger.warning(f"Could not fetch OS disk details for VM {vm.name}: {disk_err}")
+                                 disk_info_list.append({'name': vm.storage_profile.os_disk.name, 'error': 'Could not fetch full details'})
+
+                         # Get Data Disk details
+                         if vm.storage_profile.data_disks:
+                             for data_disk in vm.storage_profile.data_disks:
+                                 if data_disk.managed_disk:
+                                      try:
+                                         data_disk_name = data_disk.name
+                                         data_disk_id = data_disk.managed_disk.id
+                                         data_disk_gb = data_disk.disk_size_gb
+                                         disk_resource = compute_client.disks.get(rg_name, data_disk_name)
+                                         data_disk_sku = disk_resource.sku.name if disk_resource.sku else 'Unknown'
+                                         data_disk_location = disk_resource.location
+                                         disk_info_list.append({
+                                             'name': data_disk_name,
+                                             'size_gb': data_disk_gb,
+                                             'sku': data_disk_sku,
+                                             'location': data_disk_location,
+                                             'id': data_disk_id
+                                         })
+                                      except Exception as disk_err:
+                                         logger.warning(f"Could not fetch data disk {data_disk.name} details for VM {vm.name}: {disk_err}")
+                                         disk_info_list.append({'name': data_disk.name, 'error': 'Could not fetch full details'})
+
+                    vm_details['disks'] = disk_info_list
+                    stopped_vms.append(vm_details)
+
             except Exception as iv_error:
                  # Log specific error for instance view failure
-                 logging.warning(f"Could not get instance view for VM {vm.name} in RG {rg_name}. Error: {iv_error}", exc_info=True)
+                 # Use rg_name if available, otherwise vm.id
+                 vm_identifier = f"VM {vm.name} in RG {rg_name}" if rg_name else f"VM ID {vm.id}"
+                 logging.warning(f"Could not get instance view for {vm_identifier}. Error: {iv_error}", exc_info=True)
                  console.print(f"  [yellow]Warning:[/][dim] Could not get instance view for VM {vm.name}. Skipping status check.[/]")
 
         if not stopped_vms:

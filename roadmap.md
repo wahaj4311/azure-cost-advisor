@@ -51,13 +51,13 @@
 - Detect low‑usage App Services or databases (requires metric queries). [Done - Implemented via functions for ASPs, DBs (DTU/vCore), Apps, Gateways]
 - **[Remaining]:** (Optional) Leverage Azure Resource Graph for advanced queries.
 
-### 7. Cost Optimization Suggestions [Partially Done]
-- Match detected unused/underutilized resources with potential *specific* savings (e.g., using Retail Prices API). [Partially Done - Implemented for Disks, IPs, ASPs, Snapshots]
+### 7. Cost Optimization Suggestions [Partially Done -> Done]
+- Match detected unused/underutilized resources with potential *specific* savings (e.g., using Retail Prices API). [Done - Implemented for Disks, IPs, ASPs, Snapshots, VMs, SQL DBs, App Gateways]
 - **[Remaining]:** Refine price filtering logic (SKU/Meter mapping) for accuracy.
-- **[Remaining]:** Extend pricing lookup to other resources (IPs, Snapshots, ASPs). [Done - Implemented for IPs, Snapshots, ASPs]
-- Generate actionable recommendations, for example:
+- Extend pricing lookup to other resources (IPs, Snapshots, ASPs). [Done]
+- Generate actionable recommendations, for example: [Done]
   > "Delete disk `X` to save `$Y` per month.”
-- *Currently implemented: Recommendations include total cost for the resource type as context, plus specific estimates for Unattached Disks, IPs, ASPs, Snapshots. Low-usage resources have general recommendations.*
+- *Currently implemented: Recommendations include estimated current monthly cost for most resource types (Disks, IPs, ASPs, Snapshots, VMs, SQL DBs, Gateways) as potential savings if deleted/scaled down.*
 
 ---
 
@@ -95,8 +95,8 @@
 
 ## Phase 6: Visualization & Dashboard (Optional)
 
-### 11. Dashboard Integration [Not Started]
-- **[Remaining]:** Push data to Power BI or Grafana for interactive dashboards.
+### 11. Dashboard Integration [Partially Done]
+- Push data to Power BI or Grafana for interactive dashboards. [Done - Data exported to local CSV files for Grafana ingestion; Grafana configuration/dashboarding is external]
 - **[Remaining]:** Or build a simple web dashboard (Flask or Streamlit).
 - **[Remaining]:** Visualize:
   - Cost trends

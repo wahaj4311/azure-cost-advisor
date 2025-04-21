@@ -159,7 +159,7 @@ def main():
 
     console.print("\n[bold green]:mag: Analysis complete.[/]")
 
-    # --- Process Findings into DataFrames & Filter Ignored --- 
+    # --- Process Findings into DataFrames & Filter Ignored ---
     findings_dfs = {}
     ignored_dfs = {}
     potential_savings = {}
@@ -168,127 +168,208 @@ def main():
     # Define columns for each DataFrame for consistency
     columns_map = {
         'unattached_disks': ['Name', 'Resource Group', 'Location', 'Size (GB)', 'SKU', 'Potential Monthly Savings', 'ID'],
-        'stopped_vms': ['Name', 'Resource Group', 'Location', 'Recommendation', 'ID'],
+        'stopped_vms': ['Name', 'Resource Group', 'Location', 'Disk Details', 'Potential Monthly Savings', 'Recommendation', 'ID'], # Added Disk Details & Savings
         'unused_public_ips': ['Name', 'Resource Group', 'Location', 'IP Address', 'SKU', 'Potential Monthly Savings', 'ID'],
         'empty_rgs': ['Name', 'Location', 'Recommendation', 'ID'],
         'empty_asps': ['Name', 'Resource Group', 'Location', 'SKU', 'Tier', 'Potential Monthly Savings', 'ID'],
         'old_snapshots': ['Name', 'Resource Group', 'Location', 'Size (GB)', 'SKU', 'Created Date', 'Potential Monthly Savings', 'ID'],
-        'low_cpu_vms': ['Name', 'Resource Group', 'Location', 'VM Size', 'Avg CPU %', 'Recommendation', 'ID'],
-        'low_cpu_asps': ['Name', 'Resource Group', 'Location', 'SKU', 'Tier', 'Avg CPU %', 'Recommendation', 'ID'],
-        'low_dtu_dbs': ['Name', 'Resource Group', 'Location', 'SKU', 'Tier', 'Avg DTU %', 'Recommendation', 'ID'],
-        'low_cpu_vcore_dbs': ['Name', 'Resource Group', 'Location', 'SKU', 'Tier', 'Avg CPU %', 'Recommendation', 'ID'],
-        'idle_gateways': ['Name', 'Resource Group', 'Location', 'SKU', 'Tier', 'Avg Connections', 'Recommendation', 'ID'],
-        'low_cpu_apps': ['Name', 'Resource Group', 'Location', 'Plan Name', 'Plan Tier', 'Avg CPU %', 'Recommendation', 'ID'],
+        'low_cpu_vms': ['Name', 'Resource Group', 'Location', 'VM Size', 'Avg CPU %', 'Potential Monthly Savings', 'Recommendation', 'ID'], # Added Savings
+        'low_cpu_asps': ['Name', 'Resource Group', 'Location', 'SKU', 'Tier', 'Avg CPU %', 'Potential Monthly Savings', 'Recommendation', 'ID'], # Added Savings
+        'low_dtu_dbs': ['Name', 'Resource Group', 'Location', 'SKU', 'Tier', 'Avg DTU %', 'Potential Monthly Savings', 'Recommendation', 'ID'], # Added Savings
+        'low_cpu_vcore_dbs': ['Name', 'Resource Group', 'Location', 'SKU', 'Tier', 'Avg CPU %', 'Potential Monthly Savings', 'Recommendation', 'ID'], # Added Savings
+        'idle_gateways': ['Name', 'Resource Group', 'Location', 'SKU', 'Tier', 'Avg Connections', 'Potential Monthly Savings', 'Recommendation', 'ID'], # Added Savings
+        'low_cpu_apps': ['Name', 'Resource Group', 'Location', 'Plan Name', 'Plan Tier', 'Avg CPU %', 'Potential Monthly Savings', 'Recommendation', 'ID'], # Added Savings (likely 0)
         'orphaned_nsgs': ['Name', 'Resource Group', 'Location', 'Recommendation', 'ID'],
         'orphaned_rts': ['Name', 'Resource Group', 'Location', 'Recommendation', 'ID']
     }
 
-    # --- Calculate Potential Savings --- 
+    # --- Calculate Potential Savings ---
     console.print("\n[bold blue]--- Calculating Potential Savings ---[/]")
-    with console.status("[cyan]Estimating savings for identified resources...[/]"):
-        # Process each finding type
-        for key, findings_list in all_findings_raw.items():
-            if not findings_list: continue # Skip if no raw findings
+    # Use Progress for better feedback during potentially slow API calls
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+        console=console,
+        transient=True
+    ) as progress:
+        # Flatten the list of all findings for easier progress tracking
+        all_raw_items = []
+        for key, items_list in all_findings_raw.items():
+            if items_list:
+                all_raw_items.extend([(key, item) for item in items_list])
 
-            processed_list = []
-            category_savings = 0.0
-            
-            # Add cost estimation logic here for relevant types
-            for item in findings_list:
-                item_cost = 0.0
-                recommendation = "Review usage and necessity."
-                try:
-                    if key == 'unattached_disks':
-                        item_cost = pricing.estimate_disk_cost(item.get('sku'), item.get('size_gb'), item.get('location'), console=console)
-                        recommendation = f"Delete if unused to potentially save ~{currency} {item_cost:.2f}/month."
-                    elif key == 'unused_public_ips':
-                        item_cost = pricing.estimate_public_ip_cost(item.get('sku'), item.get('location'), console=console)
-                        recommendation = f"Delete if unused to potentially save ~{currency} {item_cost:.2f}/month."
-                    elif key == 'empty_asps':
-                        item_cost = pricing.estimate_app_service_plan_cost(item.get('tier'), item.get('sku'), item.get('location'), console=console)
-                        recommendation = f"Delete if unused to potentially save ~{currency} {item_cost:.2f}/month."
-                    elif key == 'old_snapshots':
-                         item_cost = pricing.estimate_snapshot_cost(item.get('size_gb'), item.get('location'), item.get('sku'), console=console)
-                         recommendation = f"Delete if unused to potentially save ~{currency} {item_cost:.2f}/month."
-                    elif key == 'stopped_vms':
-                         recommendation = "Deallocate to stop compute charges, or delete if no longer needed."
-                         # Note: Direct saving is compute, but keep disk cost in mind.
-                    elif key == 'low_cpu_vms':
-                         recommendation = "Consider resizing to a smaller, cheaper instance type."
-                         # Savings calculation requires knowing target size - complex
-                    elif key == 'low_cpu_asps' or key == 'low_cpu_apps':
-                         recommendation = "Consider scaling down the plan or consolidating applications."
-                         # Savings calculation requires knowing target SKU - complex
-                    elif key == 'low_dtu_dbs' or key == 'low_cpu_vcore_dbs':
-                         recommendation = "Consider scaling down the database tier."
-                         # Savings calculation requires knowing target tier - complex
-                    elif key == 'idle_gateways':
-                         recommendation = "Consider resizing, pausing (if possible), or deleting if unused."
-                         # Savings calculation depends on action
-                    elif key == 'empty_rgs' or key == 'orphaned_nsgs' or key == 'orphaned_rts':
-                         recommendation = "Delete if confirmed unused."
-                         # No direct cost associated with the container/rule itself usually
+        task_savings = progress.add_task("[cyan]Estimating savings...", total=len(all_raw_items))
 
-                except Exception as e:
-                    logger.warning(f"Error estimating cost for {key} '{item.get('name')}': {e}", exc_info=True)
-                    item_cost = 0.0 # Default to 0 if estimation fails
-                
-                item['Potential Monthly Savings'] = item_cost
-                item['Recommendation'] = recommendation
-                # Rename/map columns to match target DataFrame columns
-                item['Size (GB)'] = item.pop('size_gb', None)
-                item['SKU'] = item.pop('sku', None)
-                item['Created Date'] = item.pop('time_created', None)
-                item['VM Size'] = item.pop('size', None)
-                item['Avg CPU %'] = item.pop('avg_cpu_percent', None)
-                item['Avg DTU %'] = item.pop('avg_dtu_percent', None)
-                item['Avg Connections'] = item.pop('avg_current_connections', None)
-                item['Plan Name'] = item.pop('plan_name', None)
-                item['Plan Tier'] = item.pop('plan_tier', None)
-                item['Tier'] = item.pop('tier', item.get('Tier')) # Keep tier if already exists
-                item['IP Address'] = item.pop('ip_address', None)
-                item['Details'] = item.pop('details', None) # Catch all for specific details
-                item['Name'] = item.get('name') # Ensure Name exists
-                item['Resource Group'] = item.get('resource_group')
-                item['Location'] = item.get('location')
-                item['ID'] = item.get('id')
-                
-                processed_list.append(item)
-                # Add item_cost only if it's not ignored later
-                # We calculate total savings AFTER filtering
+        # Process each finding type and item individually
+        processed_findings = {key: [] for key in all_findings_raw.keys()} # Store processed items
 
-            # Create DataFrame and filter ignored resources
-            target_columns = columns_map.get(key, list(processed_list[0].keys()) if processed_list else [])
-            df_filtered, df_ignored = process_findings_to_df(processed_list, key, columns=target_columns)
-            
-            findings_dfs[key] = df_filtered
-            ignored_dfs[key] = df_ignored
+        for key, item in all_raw_items:
+            item_cost = 0.0
+            recommendation = "Review usage and necessity."
+            try:
+                # --- Existing Cost Estimations ---
+                if key == 'unattached_disks':
+                    item_cost = pricing.estimate_disk_cost(item.get('sku'), item.get('size_gb'), item.get('location'), console=console)
+                    recommendation = f"Delete if unused to potentially save ~{currency} {item_cost:.2f}/month."
+                elif key == 'unused_public_ips':
+                    item_cost = pricing.estimate_public_ip_cost(item.get('sku'), item.get('location'), console=console)
+                    recommendation = f"Delete if unused to potentially save ~{currency} {item_cost:.2f}/month."
+                elif key == 'empty_asps':
+                    item_cost = pricing.estimate_app_service_plan_cost(item.get('tier'), item.get('sku'), item.get('location'), console=console)
+                    recommendation = f"Delete if unused to potentially save ~{currency} {item_cost:.2f}/month."
+                elif key == 'old_snapshots':
+                    item_cost = pricing.estimate_snapshot_cost(item.get('size_gb'), item.get('location'), item.get('sku'), console=console)
+                    recommendation = f"Delete if unused to potentially save ~{currency} {item_cost:.2f}/month."
 
-            # Calculate savings based on FILTERED items
-            if not df_filtered.empty and 'Potential Monthly Savings' in df_filtered.columns:
-                category_savings = pd.to_numeric(df_filtered['Potential Monthly Savings'], errors='coerce').sum()
-                if category_savings > 0:
-                    potential_savings[key.replace('_', ' ').title()] = category_savings
-                    total_potential_savings += category_savings
+                # --- Updated/New Cost Estimations ---
+                elif key == 'stopped_vms':
+                    # Assumes 'disks': [{'name': 'disk1', 'size_gb': 128, 'sku': 'Premium_LRS', 'location': 'eastus'}, ...] is added to 'item' by analysis.find_stopped_vms
+                    disk_costs = []
+                    total_disk_cost = 0.0
+                    disks_info = item.get('disks', [])
+                    if disks_info:
+                        for disk in disks_info:
+                            disk_cost = pricing.estimate_disk_cost(disk.get('sku'), disk.get('size_gb'), disk.get('location', item.get('location')), console=console)
+                            disk_costs.append(f"{disk.get('name')} ({disk.get('sku')}, {disk.get('size_gb')}GB): ~{currency} {disk_cost:.2f}/month")
+                            total_disk_cost += disk_cost
+                        item['Disk Details'] = "; ".join(disk_costs)
+                        item_cost = total_disk_cost
+                        recommendation = f"VM is stopped, but disks still incur costs (~{currency} {item_cost:.2f}/month). Deallocate VM (if not done) or delete VM and disks if no longer needed."
+                    else:
+                         item['Disk Details'] = "Disk info not available."
+                         recommendation = "VM is stopped. Deallocate to stop compute charges or delete if no longer needed (check disk costs separately)."
+                         item_cost = 0.0 # Cannot estimate disk cost without info
 
-    # Combine all ignored items into one DataFrame for the HTML report
-    all_ignored_list = []
-    for key, df_ignored in ignored_dfs.items():
-        if not df_ignored.empty:
-            temp_df = df_ignored.copy()
-            temp_df['Finding Type'] = key.replace('_', ' ').title() # Add type
-            # Ensure standard columns exist
-            base_cols = ['Finding Type', 'Name', 'Resource Group', 'Location', 'ID']
-            for col in base_cols:
-                if col not in temp_df.columns:
-                    temp_df[col] = 'N/A'
-            all_ignored_list.append(temp_df[base_cols]) # Select standard columns
-    
-    ignored_resources_df = pd.concat(all_ignored_list, ignore_index=True) if all_ignored_list else pd.DataFrame()
-    
-    # --- Generate Console Summary Report --- 
-    # Use the reporting module
-    console_summary = reporting.generate_summary_report(
+                elif key == 'low_cpu_vms':
+                    # Estimate CURRENT cost of the VM as potential saving if deleted
+                    vm_size = item.get('size') # Original key from analysis
+                    location = item.get('location')
+                    # Assume Linux if OS not provided by analysis function (needs update there too ideally)
+                    os_type = item.get('os_type', 'Linux')
+                    if vm_size and location:
+                        # Placeholder for the new pricing function call
+                        item_cost = pricing.estimate_vm_cost(vm_size, location, os_type=os_type, console=console) # Needs implementation in pricing.py
+                        recommendation = f"Low CPU usage detected (Avg: {item.get('avg_cpu_percent', 'N/A'):.1f}%). Consider resizing to a smaller instance type. Current estimated compute cost is ~{currency} {item_cost:.2f}/month (potential saving if deleted)."
+                    else:
+                        recommendation = f"Low CPU usage detected (Avg: {item.get('avg_cpu_percent', 'N/A'):.1f}%). Consider resizing to a smaller instance type. (Could not estimate current cost)."
+                        item_cost = 0.0
+
+                elif key == 'low_cpu_asps':
+                     # Estimate CURRENT cost of the ASP
+                     tier = item.get('tier')
+                     sku_name = item.get('sku')
+                     location = item.get('location')
+                     if tier and sku_name and location:
+                         item_cost = pricing.estimate_app_service_plan_cost(tier, sku_name, location, console=console)
+                         recommendation = f"Low CPU usage detected (Avg: {item.get('avg_cpu_percent', 'N/A'):.1f}%). Consider scaling down the plan or consolidating apps. Current estimated plan cost is ~{currency} {item_cost:.2f}/month."
+                     else:
+                         recommendation = f"Low CPU usage detected (Avg: {item.get('avg_cpu_percent', 'N/A'):.1f}%). Consider scaling down the plan or consolidating apps. (Could not estimate current cost)."
+                         item_cost = 0.0
+
+                elif key == 'low_cpu_apps':
+                    # Cost is tied to the plan, already estimated in 'low_cpu_asps'
+                    item_cost = 0.0 # No direct cost saving from the app itself
+                    recommendation = f"Low CPU usage detected (Avg: {item.get('avg_cpu_percent', 'N/A'):.1f}%). Saving potential is linked to scaling down the App Service Plan '{item.get('plan_name', 'Unknown')}'."
+
+                elif key == 'low_dtu_dbs' or key == 'low_cpu_vcore_dbs':
+                    # Estimate CURRENT cost of the DB
+                    tier = item.get('tier')
+                    sku_name = item.get('sku')
+                    family = item.get('family') # e.g., 'Basic', 'Standard', 'GP', 'BC'
+                    capacity = item.get('capacity') # e.g., DTUs or vCores
+                    location = item.get('location')
+                    avg_metric = item.get('avg_dtu_percent') if key == 'low_dtu_dbs' else item.get('avg_cpu_percent')
+                    metric_name = "DTU" if key == 'low_dtu_dbs' else "CPU"
+
+                    if location: # Tier/SKU might be complex, focus on getting *some* estimate
+                        item_cost = pricing.estimate_sql_database_cost(tier, sku_name, family, capacity, location, console=console)
+                        recommendation = f"Low {metric_name} usage detected (Avg: {avg_metric:.1f}%). Consider scaling down the database tier/size. Current estimated cost is ~{currency} {item_cost:.2f}/month."
+                    else:
+                         recommendation = f"Low {metric_name} usage detected (Avg: {avg_metric:.1f}%). Consider scaling down the database tier/size. (Could not estimate current cost)."
+                         item_cost = 0.0
+
+                elif key == 'idle_gateways':
+                    # Estimate CURRENT cost of the Gateway
+                    tier = item.get('tier') # e.g., 'Standard', 'WAF'
+                    sku_name = item.get('sku') # e.g., 'Standard_Small', 'WAF_Medium'
+                    location = item.get('location')
+                    if tier and sku_name and location:
+                         # Placeholder for the new pricing function call
+                         item_cost = pricing.estimate_app_gateway_cost(tier, sku_name, location, console=console) # Needs implementation in pricing.py
+                         recommendation = f"Gateway appears idle (Avg Connections: {item.get('avg_current_connections', 'N/A'):.1f}). Consider resizing, pausing (if applicable), or deleting if unused. Current estimated cost is ~{currency} {item_cost:.2f}/month."
+                    else:
+                         recommendation = f"Gateway appears idle (Avg Connections: {item.get('avg_current_connections', 'N/A'):.1f}). Consider resizing, pausing, or deleting if unused. (Could not estimate current cost)."
+                         item_cost = 0.0
+
+                # --- Resources with no direct cost or already handled ---
+                elif key == 'empty_rgs' or key == 'orphaned_nsgs' or key == 'orphaned_rts':
+                    recommendation = "Delete if confirmed unused."
+                    item_cost = 0.0 # No direct cost associated
+
+            except Exception as e:
+                logger.warning(f"Error estimating cost for {key} '{item.get('name', 'Unknown')}': {e}", exc_info=args.debug) # Show stacktrace if debug
+                item_cost = 0.0 # Default to 0 if estimation fails
+
+            item['Potential Monthly Savings'] = item_cost if item_cost is not None else 0.0 # Ensure it's a float
+            item['Recommendation'] = recommendation
+            # Don't add to total here, recalculate after processing all items
+
+            # Rename/map columns to match target DataFrame columns (use .pop with default None)
+            item['Name'] = item.pop('name', item.get('Name')) # Keep original if exists
+            item['Resource Group'] = item.pop('resource_group', item.get('Resource Group'))
+            item['Location'] = item.pop('location', item.get('Location'))
+            item['Size (GB)'] = item.pop('size_gb', item.get('Size (GB)'))
+            item['SKU'] = item.pop('sku', item.get('SKU'))
+            item['Created Date'] = item.pop('time_created', item.get('Created Date')) # Handle 'time_created' from analysis
+            item['VM Size'] = item.pop('size', item.get('VM Size')) # Handle 'size' from analysis
+            item['Avg CPU %'] = item.pop('avg_cpu_percent', item.get('Avg CPU %'))
+            item['Avg DTU %'] = item.pop('avg_dtu_percent', item.get('Avg DTU %'))
+            item['Avg Connections'] = item.pop('avg_current_connections', item.get('Avg Connections'))
+            item['Plan Name'] = item.pop('plan_name', item.get('Plan Name'))
+            item['Plan Tier'] = item.pop('plan_tier', item.get('Plan Tier'))
+            item['Tier'] = item.pop('tier', item.get('Tier')) # Keep tier if already exists
+            item['IP Address'] = item.pop('ip_address', item.get('IP Address'))
+            item['ID'] = item.pop('id', item.get('ID')) # Ensure ID is standardized
+
+            processed_findings[key].append(item)
+            progress.update(task_savings, advance=1)
+
+        # Recalculate total savings from processed items in case of errors / None values
+        total_potential_savings = sum(item.get('Potential Monthly Savings', 0.0)
+                                    for findings_list in processed_findings.values()
+                                    for item in findings_list)
+        potential_savings = {key: sum(item.get('Potential Monthly Savings', 0.0) for item in items)
+                             for key, items in processed_findings.items() if items}
+
+    console.print(f"\n[bold green]:dollar: Potential monthly savings identified: ~{currency} {total_potential_savings:.2f}[/]")
+
+    # --- Create DataFrames from Processed Findings ---
+    console.print("\n[bold blue]--- Preparing Report Data ---[/]")
+    with console.status("[cyan]Creating result tables...[/]"):
+        for key, findings_list in processed_findings.items():
+            cols = columns_map.get(key)
+            # Use the process_findings_to_df function which handles filtering and column selection
+            findings_dfs[key], ignored_dfs[key] = process_findings_to_df(
+                findings_list,
+                finding_type=key,
+                columns=cols
+            )
+            logger.info(f"Processed {key}: Found {len(findings_dfs[key])} actionable items, {len(ignored_dfs[key])} ignored items.")
+            if not findings_dfs[key].empty:
+                 logger.debug(f"Actionable {key} columns: {findings_dfs[key].columns.tolist()}")
+                 logger.debug(f"Actionable {key} head:\n{findings_dfs[key].head().to_string()}")
+            if not ignored_dfs[key].empty:
+                 logger.debug(f"Ignored {key} columns: {ignored_dfs[key].columns.tolist()}")
+                 logger.debug(f"Ignored {key} head:\n{ignored_dfs[key].head().to_string()}")
+
+    # --- Export Findings for Grafana/External Tools ---
+    grafana_export_dir = "grafana_export"
+    console.print(f"\n[bold blue]--- Exporting Findings to CSV for External Tools ({grafana_export_dir}/) ---[/]")
+    reporting.export_findings_to_csv_local(findings_dfs, grafana_export_dir)
+
+    # --- Generate Console Summary Report ---
+    reporting.generate_summary_report(
         findings_dfs=findings_dfs, 
         total_potential_savings=total_potential_savings,
         currency=currency,
@@ -319,7 +400,7 @@ def main():
         potential_savings=potential_savings,
         total_potential_savings=total_potential_savings,
         cost_breakdown=costs_by_type, # Use the cost data fetched earlier
-        ignored_resources_df=ignored_resources_df, # Pass combined ignored DF
+        ignored_resources_df=pd.concat(ignored_dfs.values(), ignore_index=True) if ignored_dfs else pd.DataFrame(), # Pass combined ignored DF
         include_ignored=args.include_ignored_in_report,
         subscription_id=subscription_id, # Pass context
         currency=currency # Pass context

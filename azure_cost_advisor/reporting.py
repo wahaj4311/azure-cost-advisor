@@ -24,6 +24,7 @@ from .config import (
 
 # Initialize console for potential standalone use or if passed
 _console = Console()
+logger = logging.getLogger()
 
 # --- Report Generation Functions ---
 
@@ -450,30 +451,58 @@ def send_email_report(report_content, smtp_config: dict, console: Console = _con
 
 # --- Rich Table Helper (can be used by console summary) ---
 def print_rich_table(df, title, icon=":mag:", console: Console = _console):
-    """Prints a pandas DataFrame using Rich Table."""
-    if df is not None and not df.empty:
-        table = Table(title=f"{icon} {title}", show_header=True, header_style="bold magenta", title_style="bold blue")
-        # Add columns from DataFrame
-        for col in df.columns:
-            # Configure column appearance
-            style = "dim" if "ID" in col else None
-            no_wrap = True if "ID" in col else False
-            max_width = 50 if "ID" in col else None
-            overflow = "ellipsis" if "ID" in col else None
-            justify = "right" if "Savings" in col or "Cost" in col else "left"
-            
-            table.add_column(
-                col, 
-                style=style, 
-                no_wrap=no_wrap, 
-                max_width=max_width, 
-                overflow=overflow,
-                justify=justify
-            )
-        # Add rows
-        for _, row in df.iterrows():
-            # Convert all row values to strings, handle None/NaN
-            table.add_row(*[str(item) if pd.notna(item) else "" for item in row.values])
-        console.print(table)
-    else:
-        console.print(f"  ✔ [green]{title}: None found.[/green]") 
+    """Prints a DataFrame as a nicely formatted Rich table."""
+    if df is None or df.empty:
+        return # Don't print empty tables
+
+    table = Table(title=f"\n{icon} {title}", show_header=True, header_style="bold magenta")
+
+    # Add columns
+    for column in df.columns:
+         # Simple heuristic for column styling
+         style = "green" if "Savings" in column else None
+         justify = "right" if "Savings" in column or "Size" in column or "Avg" in column else "left"
+         table.add_column(column, style=style, justify=justify)
+
+    # Add rows
+    for _, row in df.iterrows():
+        # Convert all row items to strings, handling potential NaN/None
+        str_row = [str(item) if pd.notna(item) else "N/A" for item in row]
+        table.add_row(*str_row)
+
+    console.print(table)
+
+# --- Export Functions ---
+
+def export_findings_to_csv_local(findings_dfs: dict, export_dir: str):
+    """Exports non-empty findings DataFrames to CSV files in a local directory."""
+    if not findings_dfs:
+        logger.info("No findings data to export.")
+        return
+
+    try:
+        # Ensure the export directory exists
+        os.makedirs(export_dir, exist_ok=True)
+        logger.info(f"Ensured local export directory exists: {export_dir}")
+
+        exported_files_count = 0
+        for finding_type, df in findings_dfs.items():
+            if df is not None and not df.empty:
+                filename = f"{finding_type}.csv"
+                filepath = os.path.join(export_dir, filename)
+                try:
+                    df.to_csv(filepath, index=False, encoding='utf-8')
+                    logger.info(f"Successfully exported {finding_type} findings to {filepath}")
+                    exported_files_count += 1
+                except Exception as e:
+                    logger.error(f"Failed to export {finding_type} to CSV {filepath}: {e}", exc_info=True)
+            else:
+                 logger.debug(f"Skipping export for empty finding type: {finding_type}")
+
+        if exported_files_count > 0:
+             logger.info(f"Finished exporting {exported_files_count} finding(s) to CSV files in {export_dir}")
+        else:
+             logger.info(f"No non-empty findings DataFrames were available to export to CSV.")
+
+    except Exception as e:
+         logger.error(f"Error during local CSV export process to directory {export_dir}: {e}", exc_info=True) 
