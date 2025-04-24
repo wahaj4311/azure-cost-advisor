@@ -57,7 +57,22 @@ def generate_html_report_content(
     logger = logging.getLogger()
 
     # --- Helper function to convert DataFrame to HTML table within a Bootstrap Card ---
-    def df_to_html_card(df, title, card_id, icon_class="bi-question-circle", description=None):
+    def df_to_html_card(df, title, id_suffix, icon_class, description):
+        """Convert a DataFrame to an HTML card with styled data table."""
+        # If empty dataframe or None, return an empty card with appropriate message
+        if df is None or (hasattr(df, 'empty') and df.empty):
+            return f"""
+            <div class="card mb-4">
+                <div class="card-header">
+                    <i class="bi {icon_class}"></i> {title}
+                </div>
+                <div class="card-body">
+                    <p class="card-text">{description}</p>
+                    <p class="no-data-message"><i class="bi bi-check-circle-fill text-success"></i> No resources found in this category.</p>
+                </div>
+            </div>
+            """
+
         card_header = f"<h5 class=\"mb-0\"><i class=\"{icon_class} me-2\"></i>{title}</h5>"
         
         card_body_content = ""
@@ -74,7 +89,7 @@ def generate_html_report_content(
             card_body_content += f"<div class=\"table-responsive\">{table_html}</div>"
 
         card = f"""
-        <div class=\"card mb-4 shadow-sm\" id=\"{card_id}\">
+        <div class=\"card mb-4 shadow-sm\" id=\"{id_suffix}\">
             <div class=\"card-header\">{card_header}</div>
             <div class=\"card-body\">{card_body_content}</div>
         </div>

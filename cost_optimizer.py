@@ -102,11 +102,11 @@ def main():
     args = parser.parse_args()
 
     # --- Setup Logging --- (Using the function from utils module)
-    log_level = logging.DEBUG if args.debug else logging.INFO
+    log_level = logging.DEBUG if args.debug else logging.WARNING # Default to WARNING
     global logger # Make logger accessible globally if needed elsewhere
     logger = utils.setup_logger(level=log_level, filename=config.LOG_FILENAME) # Pass level and filename
-    logger.info("--- Script Execution Started ---")
-    logger.info(f"Arguments: {args}")
+    logger.info("--- Script Execution Started ---") # This INFO message will still go to the file
+    logger.info(f"Arguments: {args}") # This INFO message will still go to the file
 
     # --- Load Ignored Resources ---
     load_ignored_resources(args.ignore_file)
@@ -150,6 +150,14 @@ def main():
         all_findings_raw['low_cpu_asps'] = analysis.find_low_usage_app_service_plans(credential, subscription_id, cpu_threshold_percent=config.APP_SERVICE_PLAN_LOW_CPU_THRESHOLD_PERCENT, lookback_days=config.METRIC_LOOKBACK_DAYS, console=console)
         all_findings_raw['low_dtu_dbs'] = analysis.find_low_dtu_sql_databases(credential, subscription_id, dtu_threshold_percent=config.SQL_DB_LOW_DTU_THRESHOLD_PERCENT, lookback_days=config.METRIC_LOOKBACK_DAYS, console=console)
         all_findings_raw['low_cpu_vcore_dbs'] = analysis.find_low_cpu_sql_vcore_databases(credential, subscription_id, cpu_threshold_percent=config.SQL_VCORE_LOW_CPU_THRESHOLD_PERCENT, lookback_days=config.METRIC_LOOKBACK_DAYS, console=console)
+        
+        # Ensure low_cpu_vcore_dbs is always a list
+        if all_findings_raw['low_cpu_vcore_dbs'] is None:
+            all_findings_raw['low_cpu_vcore_dbs'] = []
+        elif isinstance(all_findings_raw['low_cpu_vcore_dbs'], str):
+            logger.error(f"low_cpu_vcore_dbs returned a string instead of a list: {all_findings_raw['low_cpu_vcore_dbs']}")
+            all_findings_raw['low_cpu_vcore_dbs'] = []
+            
         all_findings_raw['idle_gateways'] = analysis.find_idle_application_gateways(credential, subscription_id, lookback_days=config.METRIC_LOOKBACK_DAYS, idle_connection_threshold=config.IDLE_CONNECTION_THRESHOLD_GATEWAY, console=console)
         all_findings_raw['low_cpu_apps'] = analysis.find_low_usage_web_apps(credential, subscription_id, cpu_threshold_percent=config.LOW_CPU_THRESHOLD_WEB_APP, lookback_days=config.METRIC_LOOKBACK_DAYS, console=console)
         all_findings_raw['orphaned_nsgs'] = analysis.find_orphaned_nsgs(credential, subscription_id, console=console)
@@ -205,21 +213,27 @@ def main():
         processed_findings = {key: [] for key in all_findings_raw.keys()} # Store processed items
 
         for key, item in all_raw_items:
+            # *** Add type check at the very beginning of the loop ***
+            if not isinstance(item, dict):
+                logger.error(f"Skipping item processing for key '{key}': Expected a dictionary but got {type(item)}. Item value: {item}")
+                continue # Skip this iteration entirely
+
             item_cost = 0.0
             recommendation = "Review usage and necessity."
             try:
                 # --- Existing Cost Estimations ---
                 if key == 'unattached_disks':
-                    item_cost = pricing.estimate_disk_cost(item.get('sku'), item.get('size_gb'), item.get('location'), console=console)
+                    # .get() is safe here because we checked isinstance(item, dict) above
+                    item_cost = pricing.estimate_disk_cost(item.get('sku'), item.get('size_gb'), item.get('location'), console=console, logger=logger)
                     recommendation = f"Delete if unused to potentially save ~{currency} {item_cost:.2f}/month."
                 elif key == 'unused_public_ips':
-                    item_cost = pricing.estimate_public_ip_cost(item.get('sku'), item.get('location'), console=console)
+                    item_cost = pricing.estimate_public_ip_cost(item.get('sku'), item.get('location'), console=console, logger=logger)
                     recommendation = f"Delete if unused to potentially save ~{currency} {item_cost:.2f}/month."
                 elif key == 'empty_asps':
-                    item_cost = pricing.estimate_app_service_plan_cost(item.get('tier'), item.get('sku'), item.get('location'), console=console)
+                    item_cost = pricing.estimate_app_service_plan_cost(item.get('tier'), item.get('sku'), item.get('location'), console=console, logger=logger)
                     recommendation = f"Delete if unused to potentially save ~{currency} {item_cost:.2f}/month."
                 elif key == 'old_snapshots':
-                    item_cost = pricing.estimate_snapshot_cost(item.get('size_gb'), item.get('location'), item.get('sku'), console=console)
+                    item_cost = pricing.estimate_snapshot_cost(item.get('size_gb'), item.get('location'), item.get('sku'), console=console, logger=logger)
                     recommendation = f"Delete if unused to potentially save ~{currency} {item_cost:.2f}/month."
 
                 # --- Updated/New Cost Estimations ---
@@ -230,7 +244,7 @@ def main():
                     disks_info = item.get('disks', [])
                     if disks_info:
                         for disk in disks_info:
-                            disk_cost = pricing.estimate_disk_cost(disk.get('sku'), disk.get('size_gb'), disk.get('location', item.get('location')), console=console)
+                            disk_cost = pricing.estimate_disk_cost(disk.get('sku'), disk.get('size_gb'), disk.get('location', item.get('location')), console=console, logger=logger)
                             disk_costs.append(f"{disk.get('name')} ({disk.get('sku')}, {disk.get('size_gb')}GB): ~{currency} {disk_cost:.2f}/month")
                             total_disk_cost += disk_cost
                         item['Disk Details'] = "; ".join(disk_costs)
@@ -249,7 +263,7 @@ def main():
                     os_type = item.get('os_type', 'Linux')
                     if vm_size and location:
                         # Placeholder for the new pricing function call
-                        item_cost = pricing.estimate_vm_cost(vm_size, location, os_type=os_type, console=console) # Needs implementation in pricing.py
+                        item_cost = pricing.estimate_vm_cost(vm_size, location, os_type=os_type, console=console, logger=logger)
                         recommendation = f"Low CPU usage detected (Avg: {item.get('avg_cpu_percent', 'N/A'):.1f}%). Consider resizing to a smaller instance type. Current estimated compute cost is ~{currency} {item_cost:.2f}/month (potential saving if deleted)."
                     else:
                         recommendation = f"Low CPU usage detected (Avg: {item.get('avg_cpu_percent', 'N/A'):.1f}%). Consider resizing to a smaller instance type. (Could not estimate current cost)."
@@ -261,7 +275,7 @@ def main():
                      sku_name = item.get('sku')
                      location = item.get('location')
                      if tier and sku_name and location:
-                         item_cost = pricing.estimate_app_service_plan_cost(tier, sku_name, location, console=console)
+                         item_cost = pricing.estimate_app_service_plan_cost(tier, sku_name, location, console=console, logger=logger)
                          recommendation = f"Low CPU usage detected (Avg: {item.get('avg_cpu_percent', 'N/A'):.1f}%). Consider scaling down the plan or consolidating apps. Current estimated plan cost is ~{currency} {item_cost:.2f}/month."
                      else:
                          recommendation = f"Low CPU usage detected (Avg: {item.get('avg_cpu_percent', 'N/A'):.1f}%). Consider scaling down the plan or consolidating apps. (Could not estimate current cost)."
@@ -283,7 +297,7 @@ def main():
                     metric_name = "DTU" if key == 'low_dtu_dbs' else "CPU"
 
                     if location: # Tier/SKU might be complex, focus on getting *some* estimate
-                        item_cost = pricing.estimate_sql_database_cost(tier, sku_name, family, capacity, location, console=console)
+                        item_cost = pricing.estimate_sql_database_cost(tier, sku_name, family, capacity, location, console=console, logger=logger)
                         recommendation = f"Low {metric_name} usage detected (Avg: {avg_metric:.1f}%). Consider scaling down the database tier/size. Current estimated cost is ~{currency} {item_cost:.2f}/month."
                     else:
                          recommendation = f"Low {metric_name} usage detected (Avg: {avg_metric:.1f}%). Consider scaling down the database tier/size. (Could not estimate current cost)."
@@ -296,7 +310,7 @@ def main():
                     location = item.get('location')
                     if tier and sku_name and location:
                          # Placeholder for the new pricing function call
-                         item_cost = pricing.estimate_app_gateway_cost(tier, sku_name, location, console=console) # Needs implementation in pricing.py
+                         item_cost = pricing.estimate_app_gateway_cost(tier, sku_name, location, console=console, logger=logger)
                          recommendation = f"Gateway appears idle (Avg Connections: {item.get('avg_current_connections', 'N/A'):.1f}). Consider resizing, pausing (if applicable), or deleting if unused. Current estimated cost is ~{currency} {item_cost:.2f}/month."
                     else:
                          recommendation = f"Gateway appears idle (Avg Connections: {item.get('avg_current_connections', 'N/A'):.1f}). Consider resizing, pausing, or deleting if unused. (Could not estimate current cost)."
@@ -308,7 +322,9 @@ def main():
                     item_cost = 0.0 # No direct cost associated
 
             except Exception as e:
-                logger.warning(f"Error estimating cost for {key} '{item.get('name', 'Unknown')}': {e}", exc_info=args.debug) # Show stacktrace if debug
+                # *** Modify exception logging to be safer ***
+                item_name_for_log = item.get('name', 'Unknown') if isinstance(item, dict) else str(item) # Safely get name or string representation
+                logger.warning(f"Error processing item for key '{key}' (Name/ID: '{item_name_for_log}'): {e}", exc_info=args.debug) # Show stacktrace if debug
                 item_cost = 0.0 # Default to 0 if estimation fails
 
             item['Potential Monthly Savings'] = item_cost if item_cost is not None else 0.0 # Ensure it's a float
