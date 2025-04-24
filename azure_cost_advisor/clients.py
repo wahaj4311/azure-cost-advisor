@@ -31,11 +31,27 @@ def get_azure_credentials(console: Console = _console):
                 subscription_id = subs[0].subscription_id
                 console.print(f"Automatically detected and using subscription: [bold cyan]{subs[0].display_name}[/] ({subscription_id})")
             else:
-                console.print("[bold yellow]Multiple Azure subscriptions found:[/]")
-                for sub in subs:
-                    console.print(f"  - [cyan]{sub.display_name}[/] ({sub.subscription_id})")
-                logger.error("Multiple subscriptions found. Please set AZURE_SUBSCRIPTION_ID env var.")
-                raise ValueError("Multiple subscriptions found. Please set the AZURE_SUBSCRIPTION_ID environment variable to specify which one to use.")
+                console.print("[bold yellow]Multiple Azure subscriptions found. Please select one:[/]")
+                for i, sub in enumerate(subs):
+                    console.print(f"  [bold]{i+1}[/]. [cyan]{sub.display_name}[/] ({sub.subscription_id})")
+
+                while True:
+                    try:
+                        choice = console.input("Enter the number of the subscription to use: ")
+                        selected_index = int(choice) - 1
+                        if 0 <= selected_index < len(subs):
+                            selected_sub = subs[selected_index]
+                            subscription_id = selected_sub.subscription_id
+                            console.print(f"Selected subscription: [bold cyan]{selected_sub.display_name}[/] ({subscription_id})")
+                            break
+                        else:
+                            console.print("[red]Invalid selection. Please enter a number from the list.[/]")
+                    except ValueError:
+                        console.print("[red]Invalid input. Please enter a number.[/]")
+                    except EOFError: # Handle Ctrl+D or empty input gracefully
+                        console.print("\n[red]Selection cancelled.[/]")
+                        logger.warning("Subscription selection cancelled by user.")
+                        raise ValueError("Subscription selection cancelled.") # Propagate to main handler
 
         console.print(f"Using Subscription ID: [bold cyan]{subscription_id}[/]")
         console.print(":white_check_mark: [bold green]Authenticated successfully.[/]")

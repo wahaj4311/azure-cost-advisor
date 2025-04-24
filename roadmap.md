@@ -50,6 +50,9 @@
 - Identify Low CPU VMs (reporting Available Memory context). [Done]
 - Detect low‑usage App Services or databases (requires metric queries). [Done - Implemented via functions for ASPs, DBs (DTU/vCore), Apps, Gateways]
 - **[Remaining]:** (Optional) Leverage Azure Resource Graph for advanced queries.
+- **[New]:** Add support for multiple Azure subscriptions
+- **[New]:** Implement cost prediction based on historical data
+- **[New]:** Add alerting system for unexpected cost spikes
 
 ### 7. Cost Optimization Suggestions [Partially Done -> Done]
 - Match detected unused/underutilized resources with potential *specific* savings (e.g., using Retail Prices API). [Done - Implemented for Disks, IPs, ASPs, Snapshots, VMs, SQL DBs, App Gateways]
@@ -76,7 +79,9 @@
 - Generate console summary report. [Done]
 - Generate reports in HTML, or PDF format. [HTML Done]
 - Send reports via email (SMTP, SendGrid) or Azure Logic Apps. [Basic SMTP Done]
-- **[Remaining]:** (Optional) Integrate with Teams or Slack for real‑time alerts.
+- **[Remaining]:** (Optional) Integrate with Teams or Slack for real‑time alerts
+- **[New]:** Implement scheduled optimization reports
+- **[New]:** Add cost trend analysis and forecasting
 
 ---
 
@@ -90,6 +95,10 @@
   - **Azure Function** (with a Timer Trigger)  
   - or **Azure Container Instance** (with a scheduled job)
 - **[Remaining]:** Schedule periodic runs (e.g., weekly) to keep costs optimized.
+- **[New]:** Add CI/CD pipeline (GitHub Actions)
+  - Automated testing
+  - Docker image building
+  - Dependency updates
 
 ---
 
@@ -97,7 +106,12 @@
 
 ### 11. Dashboard Integration [Partially Done]
 - Push data to Power BI or Grafana for interactive dashboards. [Done - Data exported to local CSV files for Grafana ingestion; Grafana configuration/dashboarding is external]
-- **[Remaining]:** Or build a simple web dashboard (Flask or Streamlit).
+- **[New]:** Build interactive web dashboard using Streamlit:
+  - Cost trends visualization
+  - Resource usage patterns
+  - Optimization history and savings tracking
+  - Anomaly detection and alerts
+  - Recommendation history
 - **[Remaining]:** Visualize:
   - Cost trends
   - Resource usage
@@ -110,10 +124,18 @@
 ### 12. Testing [Not Started]
 - **[Remaining]:** Test against a variety of resource types and usage scenarios.
 - **[Remaining]:** Ensure only intended resources are flagged or deleted.
+- **[New]:** Add unit tests for optimization logic
+- **[New]:** Implement integration tests for Azure API calls
+- **[New]:** Create mock tests for cost scenarios
 
 ### 13. Documentation [Not Started]
 - **[Remaining]:** Provide setup, configuration, and usage instructions.
 - **[Remaining]:** Include troubleshooting tips and FAQs.
+- **[New]:** Expand README with:
+  - Setup instructions
+  - Usage examples
+  - Configuration options
+- **[New]:** Add API documentation (Sphinx)
 
 ### 14. Handover & Presentation [Not Started]
 - **[Remaining]:** Prepare a live demo or slide deck.

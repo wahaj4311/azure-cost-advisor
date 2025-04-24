@@ -11,3 +11,4 @@ azure-mgmt-sql>=3.0.0,<4.0.0
 pandas>=1.0
 rich>=13.0 # For enhanced terminal output
 # tabulate>=0.8 # Optional, for pretty console tables - Replaced by rich 
+streamlit>=1.0 

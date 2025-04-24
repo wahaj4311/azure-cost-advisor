@@ -39,6 +39,16 @@ from .config import (
 # Initialize console for potential standalone use or if passed
 _console = Console()
 
+# --- Utility Function for Timespan ---
+
+def _get_iso8601_timespan(lookback_days: int) -> str:
+    """Generates an ISO 8601 compliant timespan string (start/end)."""
+    now_utc = datetime.now(timezone.utc)
+    start_utc = now_utc - timedelta(days=lookback_days)
+    # Format: YYYY-MM-DDTHH:MM:SSZ/YYYY-MM-DDTHH:MM:SSZ
+    timespan = f"{start_utc.strftime('%Y-%m-%dT%H:%M:%SZ')}/{now_utc.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+    return timespan
+
 # --- Resource Listing and Cost Data ---
 
 def list_all_resources(credential, subscription_id, console: Console = _console):
@@ -69,7 +79,12 @@ def get_cost_data(credential, subscription_id, console: Console = _console):
     total_cost = 0.0
     currency = "N/A"
     try:
-        cost_client = CostManagementClient(credential, subscription_id) # Pass sub_id here
+        # Explicitly set the base_url to ensure HTTPS is used
+        cost_client = CostManagementClient(
+            credential=credential,
+            subscription_id=subscription_id,
+            base_url="https://management.azure.com" # Force HTTPS endpoint
+        )
         scope = f"/subscriptions/{subscription_id}" # Correct scope format
 
         now = datetime.now(timezone.utc)
@@ -472,625 +487,804 @@ def find_underutilized_vms(credential, subscription_id, cpu_threshold_percent, l
     """Finds running VMs with average CPU utilization below a threshold."""
     logger = logging.getLogger()
     logger.info(f"📉 Checking running VMs for avg CPU < {cpu_threshold_percent}% over the last {lookback_days} days...")
-    console.print(f"\n📉 Checking running VMs for avg CPU < {cpu_threshold_percent}% over the last {lookback_days} days...") # Keep simple print
-    low_cpu_vms = []
+    console.print(f"\n📉 Checking running VMs for avg CPU < {cpu_threshold_percent}% over the last {lookback_days} days...")
+    underutilized_vms = []
+    monitor_client = None # Initialize outside try block
     try:
         compute_client = ComputeManagementClient(credential, subscription_id)
         monitor_client = MonitorManagementClient(credential, subscription_id)
-        all_vms = list(compute_client.virtual_machines.list_all())
-        for vm in all_vms:
+
+        # Get the correct timespan format
+        timespan = _get_iso8601_timespan(lookback_days)
+        logger.debug(f"Using timespan for VM metrics: {timespan}")
+
+        vm_list = list(compute_client.virtual_machines.list_all())
+        running_vm_count = 0
+
+        # Check running state first
+        vms_to_check_metrics = []
+        for vm in vm_list:
+            rg_name = None
             try:
                 rg_name = vm.id.split('/')[4]
-                instance_view = compute_client.virtual_machines.instance_view(rg_name, vm.name)
-                power_state = "unknown"
-                for status in instance_view.statuses:
-                    if status.code and status.code.startswith("PowerState/"):
-                        power_state = status.code.split('/')[-1]
-                        break
-                if power_state == "running":
-                    vm_details = {
-                        "name": vm.name, 
-                        "id": vm.id, 
-                        "resource_group": rg_name,
-                        "location": vm.location, 
-                        "avg_cpu_percent": None,
-                        "size": vm.hardware_profile.vm_size if vm.hardware_profile else "Unknown" # Add VM size
-                    }
-                    
-                    if vm_details['avg_cpu_percent'] is None:
-                        avg_cpu = None
-                        metric_name = "Percentage CPU"
-                        try:
-                            metrics_data = monitor_client.metrics.list(
-                                resource_uri=vm.id,
-                                timespan=f"PT{lookback_days}D",
-                                interval="PT1H",
-                                metricnames=metric_name,
-                                aggregation="Average" 
-                            )
-                            if metrics_data.value:
-                                metric = metrics_data.value[0]
-                                if metric.timeseries and metric.timeseries[0].data:
-                                    total_cpu = 0
-                                    count = 0
-                                    for point in metric.timeseries[0].data:
-                                        if point.average is not None:
-                                            total_cpu += point.average
-                                            count += 1
-                                    if count > 0:
-                                        avg_cpu = total_cpu / count
-                        except Exception as metric_error:
-                            logging.warning(f"Could not get metrics for VM {vm.name}. Error: {metric_error}", exc_info=True)
-                            console.print(f"  - [yellow]Warning:[/yellow] Could not get metrics for VM {vm.name}.")
+            except IndexError:
+                logger.warning(f"Could not parse resource group for VM {vm.name}. Skipping power state check.")
+                continue # Skip this VM entirely if RG can't be determined
 
-                        if avg_cpu is not None:
-                            vm_details['avg_cpu_percent'] = avg_cpu
-                            if avg_cpu < cpu_threshold_percent:
-                                low_cpu_vms.append(vm_details)
-                                console.print(f"  - [yellow]Low CPU VM:[/yellow] {vm_details['name']} (Avg CPU: {vm_details['avg_cpu_percent']:.2f}%, Size: {vm_details['size']})")
+            try:
+                 instance_view = compute_client.virtual_machines.instance_view(
+                     resource_group_name=rg_name,
+                     vm_name=vm.name
+                 )
+                 power_state = None
+                 if instance_view.statuses:
+                     for status in instance_view.statuses:
+                         if status.code and status.code.startswith("PowerState/"):
+                             power_state = status.code.split('/')[-1]
+                             break
+                 if power_state == "running":
+                      vms_to_check_metrics.append((vm, rg_name))
+                      running_vm_count += 1
+            except HttpResponseError as http_err:
+                 # Log non-critical errors like 'NotFound' if VM was deleted during scan
+                 if http_err.status_code == 404:
+                     logger.warning(f"VM {vm.name} in RG {rg_name} not found during instance view check (likely deleted). Skipping.")
+                 else:
+                     # Log other HTTP errors more visibly
+                     logger.error(f"HTTP error checking instance view for VM {vm.name}: {http_err}", exc_info=True)
+                     console.print(f"  [yellow]Warning:[/yellow] HTTP error checking state for VM {vm.name}. Skipping metrics check.")
+            except Exception as e:
+                 logger.error(f"Error checking power state for VM {vm.name}: {e}", exc_info=True)
+                 console.print(f"  [yellow]Warning:[/yellow] Could not check power state for VM {vm.name}. Skipping metrics check.")
+
+        if not vms_to_check_metrics:
+            console.print("  ℹ No running VMs found to analyze.")
+            return []
+
+        console.print(f"  - Found {running_vm_count} running VMs to analyze...")
+
+        # Now query metrics only for running VMs
+        for vm, rg_name in vms_to_check_metrics:
+            try:
+                vm_info = {
+                    "name": vm.name,
+                    "id": vm.id,
+                    "resource_group": rg_name,
+                    "location": vm.location,
+                    "size": vm.hardware_profile.vm_size if vm.hardware_profile else 'Unknown',
+                    "os_type": vm.storage_profile.os_disk.os_type if vm.storage_profile and vm.storage_profile.os_disk else 'Unknown', # Add OS type
+                    "avg_cpu_percent": None
+                }
+                avg_cpu = None
+                metric_name = "Percentage CPU"
+                try:
+                    metrics_data = monitor_client.metrics.list(
+                        resource_uri=vm.id,
+                        timespan=timespan, # Use correct timespan format
+                        interval="PT1H", # Example: Hourly average
+                        metricnames=metric_name,
+                        aggregation="Average"
+                    )
+
+                    if metrics_data and metrics_data.value:
+                        time_series = metrics_data.value[0].timeseries
+                        if time_series and time_series[0].data:
+                            valid_points = [d.average for d in time_series[0].data if d.average is not None]
+                            if valid_points:
+                                avg_cpu = sum(valid_points) / len(valid_points)
+                                vm_info["avg_cpu_percent"] = avg_cpu
+                                logger.debug(f"VM {vm.name} avg CPU: {avg_cpu:.2f}%")
                             else:
-                                logging.info(f"VM {vm_details['name']} CPU usage OK (Avg: {vm_details['avg_cpu_percent']:.2f}%)")
-                                # console.print(f"  - [green]OK CPU VM:[/green] {vm_details['name']} (Avg CPU: {vm_details['avg_cpu_percent']:.2f}%)") # Too verbose?
+                                 logger.warning(f"No valid data points found for metric '{metric_name}' for VM {vm.name} in the timespan.")
                         else:
-                             logging.warning(f"No valid CPU metric data found for VM {vm_details['name']} in the specified timespan.")
-                             console.print(f"  - [dim]No CPU data for VM:[/dim] {vm_details['name']}")
+                             logger.warning(f"No time series data found for metric '{metric_name}' for VM {vm.name} in the timespan.")
+                    else:
+                         logger.warning(f"No metric data returned for '{metric_name}' for VM {vm.name}.")
 
-            except Exception as vm_error:
-                logging.warning(f"Error processing VM {vm.name}: {vm_error}", exc_info=True)
-                console.print(f"  - [yellow]Warning:[/yellow] Error processing VM {vm.name}.")
+                except HttpResponseError as metric_error:
+                     # Handle specific errors like rate limiting or invalid dimensions
+                     if metric_error.status_code == 429: # Too Many Requests
+                         logger.warning(f"Metrics query for VM {vm.name} throttled. Skipping.")
+                         console.print(f"  - [yellow]Throttled:[/yellow] Skipping metrics for VM {vm.name}.")
+                     else:
+                         # Log other HTTP errors more visibly
+                         logger.warning(f"Could not get metrics for VM {vm.name}. Error: {metric_error}", exc_info=True)
+                         console.print(f"  - [yellow]Warning:[/yellow] Could not get metrics for VM {vm.name}.")
+                except Exception as metric_error: # Catch other potential errors during metric processing
+                     logger.warning(f"Error processing metrics for VM {vm.name}: {metric_error}", exc_info=True)
+                     console.print(f"  - [yellow]Warning:[/yellow] Error processing metrics for VM {vm.name}.")
+
+
+                if avg_cpu is not None:
+                    if avg_cpu < cpu_threshold_percent:
+                        console.print(f"  - [bold yellow]Low Usage:[/bold yellow] VM {vm.name} (Avg CPU: {avg_cpu:.1f}%) is below threshold ({cpu_threshold_percent}%).")
+                        underutilized_vms.append(vm_info)
+                    else:
+                        logger.info(f"VM {vm.name} CPU usage OK (Avg: {avg_cpu:.1f}%)")
+                else:
+                    console.print(f"  - [dim]No CPU data for VM:[/dim] {vm.name}")
+
+            except Exception as e: # Catch errors in the outer loop for a specific VM
+                 logger.error(f"Error processing VM {vm.name}: {e}", exc_info=True)
+                 console.print(f"  [red]Error:[/red] Could not process VM {vm.name}. Check logs.")
 
         console.print("\n--- VM Usage Analysis Summary ---")
-        if not low_cpu_vms:
-            console.print(f"  :heavy_check_mark: No running VMs found with avg CPU < {cpu_threshold_percent}%.")
+        if underutilized_vms:
+            console.print(f"  :warning: Found {len(underutilized_vms)} running VM(s) with avg CPU < {cpu_threshold_percent}%.")
         else:
-            console.print(f"  :warning: Found {len(low_cpu_vms)} running VM(s) with avg CPU < {cpu_threshold_percent}%.")
-
-        return low_cpu_vms 
+            console.print(f"  :heavy_check_mark: No running VMs found with avg CPU < {cpu_threshold_percent}%.")
 
     except Exception as e:
-        logging.error(f"Error checking for underutilized VMs: {e}", exc_info=True)
-        console.print(f"[bold red]Error checking for underutilized VMs:[/bold red] {e}")
-        return [] 
+        logger.error(f"Error checking for underutilized VMs: {e}", exc_info=True)
+        console.print(f"[bold red]Error checking for underutilized VMs:[/] {e}")
+    return underutilized_vms
 
 def find_low_usage_app_service_plans(credential, subscription_id, cpu_threshold_percent, lookback_days, console: Console):
-    """Finds App Service Plans (Basic tier+) with low average CPU usage."""
+    """Finds App Service Plans (non-Free/Shared) with low average CPU utilization."""
     logger = logging.getLogger()
     logger.info(f"📉 Checking App Service Plans (Basic tier+) for avg CPU < {cpu_threshold_percent}% over the last {lookback_days} days...")
-    console.print(f"\n📉 Checking App Service Plans (Basic tier+) for avg CPU < {cpu_threshold_percent}% over the last {lookback_days} days...") # Keep simple print
-    low_usage_asps = []
+    console.print(f"\n📉 Checking App Service Plans (Basic tier+) for avg CPU < {cpu_threshold_percent}% over the last {lookback_days} days...")
+    low_usage_plans = []
+    monitor_client = None # Initialize outside try block
     try:
         web_client = WebSiteManagementClient(credential, subscription_id)
         monitor_client = MonitorManagementClient(credential, subscription_id)
+
+        # Get the correct timespan format
+        timespan = _get_iso8601_timespan(lookback_days)
+        logger.debug(f"Using timespan for ASP metrics: {timespan}")
+
         plans = list(web_client.app_service_plans.list())
+        plans_to_check = []
         for plan in plans:
-            # Filter out Free/Shared/Consumption plans
-            if plan.sku and plan.sku.tier and plan.sku.tier.lower() not in ['free', 'shared', 'dynamic']: 
-                 low_usage_asps.append(plan)
-            else:
-                 logging.info(f"Skipping metric check for plan {plan.name} (Tier: {plan.sku.tier if plan.sku else 'Unknown'})")
-                 # console.print(f"  - [dim]Skipping plan {plan.name} (Tier: {plan.sku.tier if plan.sku else 'Unknown'})[/dim]")
+             # Filter out Free and Shared tiers
+             if plan.sku and plan.sku.tier and plan.sku.tier.lower() not in ['free', 'shared', 'dynamic']: # Also exclude Consumption/Dynamic
+                 plans_to_check.append(plan)
 
-        if not low_usage_asps:
-            console.print("  :information_source: No App Service Plans found in relevant tiers (Basic+) to check metrics for.")
+        if not plans_to_check:
+            console.print("  ℹ No App Service Plans found in relevant tiers (Basic or higher) to analyze.")
             return []
-        else:
-             console.print(f"  - Found {len(low_usage_asps)} App Service Plans in relevant tiers to analyze...")
 
-        # --- Query Metrics for Relevant Plans --- 
-        processed_count = 0
-        for plan in low_usage_asps:
-            processed_count += 1
-            if processed_count % 5 == 0:
-                console.status(f"[cyan]Querying CPU metrics ({processed_count}/{len(low_usage_asps)})...[/]")
+        console.print(f"  - Found {len(plans_to_check)} App Service Plans in relevant tiers to analyze...")
 
-            plan_resource_uri = plan.id
-            avg_cpu = None
-            metric_name = "CpuPercentage" # Metric name for ASP CPU
+        for plan in plans_to_check:
+            plan_resource_uri = plan.id # Store URI for error messages
+            plan_name = plan.name # Store name for error messages
+            plan_details = None # Initialize plan_details for the current plan iteration
             try:
-                metrics_data = monitor_client.metrics.list(
-                    resource_uri=plan_resource_uri,
-                    timespan=f"PT{lookback_days}D",
-                    interval="PT1H",
-                    metricnames=metric_name,
-                    aggregation="Average" 
-                )
-                if metrics_data.value:
-                    metric = metrics_data.value[0]
-                    if metric.timeseries and metric.timeseries[0].data:
-                        total_cpu = 0
-                        count = 0
-                        for point in metric.timeseries[0].data:
-                            if point.average is not None:
-                                total_cpu += point.average
-                                count += 1
-                        if count > 0:
-                            avg_cpu = total_cpu / count
+                rg_name = plan.resource_group # Assumes RG is available on plan object
 
                 plan_details = {
-                    "name": plan.name, 
-                    "id": plan.id, 
-                    "resource_group": plan.id.split('/')[4],
-                    "location": plan.location, 
-                    "avg_cpu_percent": avg_cpu,
-                    "sku": plan.sku.name if plan.sku else "Unknown",
-                    "tier": plan.sku.tier if plan.sku else "Unknown"
-                }
+                     "name": plan.name,
+                     "id": plan.id,
+                     "resource_group": rg_name,
+                     "location": plan.location,
+                     "tier": plan.sku.tier,
+                     "sku": plan.sku.name,
+                     "avg_cpu_percent": None
+                 }
+                avg_cpu = None
+                metric_name = "CpuPercentage" # Metric name for ASP CPU
+                try:
+                    metrics_data = monitor_client.metrics.list(
+                        resource_uri=plan_resource_uri,
+                        timespan=timespan, # Use correct timespan format
+                        interval="PT1H",
+                        metricnames=metric_name,
+                        aggregation="Average"
+                    )
+
+                    if metrics_data and metrics_data.value:
+                        time_series = metrics_data.value[0].timeseries
+                        if time_series and time_series[0].data:
+                            valid_points = [d.average for d in time_series[0].data if d.average is not None]
+                            if valid_points:
+                                avg_cpu = sum(valid_points) / len(valid_points)
+                                plan_details["avg_cpu_percent"] = avg_cpu
+                                logger.debug(f"ASP {plan_name} avg CPU: {avg_cpu:.2f}%")
+                            else:
+                                 logger.warning(f"No valid data points found for metric '{metric_name}' for ASP {plan_name} in the timespan.")
+                        else:
+                             logger.warning(f"No time series data found for metric '{metric_name}' for ASP {plan_name} in the timespan.")
+                    else:
+                         logger.warning(f"No metric data returned for '{metric_name}' for ASP {plan_name}.")
+
+                except HttpResponseError as metric_error:
+                     if metric_error.status_code == 429: # Too Many Requests
+                         logger.warning(f"Metrics query for ASP {plan_name} throttled. Skipping.")
+                         console.print(f"  - [yellow]Throttled:[/yellow] Skipping metrics for ASP {plan_name}.")
+                     else:
+                         # Log other HTTP errors more visibly
+                         logger.warning(f"Could not get metrics for ASP {plan_name}. Error: {metric_error}", exc_info=True)
+                         console.print(f"  - [yellow]Warning:[/yellow] Could not get metrics for ASP {plan_name}.")
+                except Exception as metric_error: # Catch other potential errors during metric processing
+                     # Use plan_name which is guaranteed to be defined here
+                     logger.warning(f"Error processing metrics for ASP {plan_name}: {metric_error}", exc_info=True)
+                     console.print(f"  - [yellow]Warning:[/yellow] Error processing metrics for ASP {plan_name}.")
+
 
                 if avg_cpu is not None:
                     if avg_cpu < cpu_threshold_percent:
-                        low_usage_asps.append(plan_details)
-                        console.print(f"  - [yellow]Low CPU ASP:[/yellow] {plan_details['name']} (Avg CPU: {avg_cpu:.2f}%, SKU: {plan_details['sku']})")
+                         console.print(f"  - [bold yellow]Low Usage:[/bold yellow] ASP {plan_name} (Avg CPU: {avg_cpu:.1f}%) is below threshold ({cpu_threshold_percent}%).")
+                         low_usage_plans.append(plan_details)
                     else:
-                        logging.info(f"ASP {plan_details['name']} CPU usage OK (Avg: {avg_cpu:.2f}%)")
-                        # console.print(f"  - [green]OK CPU ASP:[/green] {plan_details['name']} (Avg CPU: {avg_cpu:.2f}%)")
+                         logger.info(f"ASP {plan_name} CPU usage OK (Avg: {avg_cpu:.1f}%)")
                 else:
-                     logging.warning(f"No valid CPU metric data found for ASP {plan_details['name']} in the specified timespan.")
-                     console.print(f"  - [dim]No CPU data for ASP:[/dim] {plan_details['name']}")
+                    # Check if plan_details was populated before printing
+                    name_to_print = plan_name if plan_name else "Unknown Plan"
+                    console.print(f"  - [dim]No CPU data for ASP:[/dim] {name_to_print}")
 
-            except Exception as metric_error:
-                # Handle throttling specifically if possible
-                if "429" in str(metric_error) or "throttled" in str(metric_error).lower():
-                     logging.warning(f"Metrics query for ASP {plan_details['name']} throttled. Skipping.")
-                     console.print(f"  - [yellow]Throttled:[/yellow] Skipping metrics for ASP {plan_details['name']}.")
-                else:
-                     logging.warning(f"Could not get metrics for ASP {plan_details['name']}. Error: {metric_error}", exc_info=True)
-                     console.print(f"  - [yellow]Warning:[/yellow] Could not get metrics for ASP {plan_details['name']}.")
+            except Exception as e: # Catch errors in the outer loop for a specific plan
+                 # Use plan_name which is guaranteed to be defined here
+                 logger.error(f"Error processing ASP {plan_name}: {e}", exc_info=True)
+                 console.print(f"  [red]Error:[/red] Could not process ASP {plan_name}. Check logs.")
+
 
         console.print("\n--- App Service Plan Usage Analysis Summary ---")
-        if not low_usage_asps:
-            console.print(f"  :heavy_check_mark: No ASPs (Basic+) found with avg CPU < {cpu_threshold_percent}%.")
+        if low_usage_plans:
+            console.print(f"  :warning: Found {len(low_usage_plans)} ASP(s) with avg CPU < {cpu_threshold_percent}%.")
         else:
-            console.print(f"  :warning: Found {len(low_usage_asps)} ASP(s) (Basic+) with avg CPU < {cpu_threshold_percent}%.")
-
-        return low_usage_asps
+            console.print(f"  :heavy_check_mark: No ASPs found with avg CPU < {cpu_threshold_percent}%.")
 
     except Exception as e:
-        logging.error(f"Error checking for low usage App Service Plans: {e}", exc_info=True)
-        console.print(f"[bold red]Error checking for low usage App Service Plans:[/bold red] {e}")
-        return []
+        # Catch potential errors fetching the initial list of plans
+        logger.error(f"Error listing or processing App Service Plans: {e}", exc_info=True)
+        console.print(f"[bold red]Error checking for low usage App Service Plans:[/] {e}")
+    return low_usage_plans
 
 def find_low_dtu_sql_databases(credential, subscription_id, dtu_threshold_percent, lookback_days, console: Console):
-    """Finds SQL Databases (DTU model) with low average DTU usage."""
+    """Finds SQL Databases (DTU-based model) with low average DTU utilization."""
     logger = logging.getLogger()
     logger.info(f"📉 Checking SQL Databases (DTU model) for avg DTU < {dtu_threshold_percent}% over the last {lookback_days} days...")
-    console.print(f"\n📉 Checking SQL Databases (DTU model) for avg DTU < {dtu_threshold_percent}% over the last {lookback_days} days...") # Keep simple print
+    console.print(f"\n📉 Checking SQL Databases (DTU model) for avg DTU < {dtu_threshold_percent}% over the last {lookback_days} days...")
     low_dtu_dbs = []
-    dtu_dbs_to_check = [] # Initialize the list to check
-
+    monitor_client = None # Initialize outside try block
     try:
         sql_client = SqlManagementClient(credential, subscription_id)
         monitor_client = MonitorManagementClient(credential, subscription_id)
-        
+
+        # Get the correct timespan format
+        timespan = _get_iso8601_timespan(lookback_days)
+        logger.debug(f"Using timespan for SQL DTU metrics: {timespan}")
+
         servers = list(sql_client.servers.list())
+        dbs_to_check = []
+
+        # Iterate through servers to find databases
         for server in servers:
+            # Extract resource group name from server ID
             try:
                 rg_name = server.id.split('/')[4]
-                databases = list(sql_client.databases.list_by_server(rg_name, server.name))
-                for db in databases:
-                    # Check if it's a DTU model database
-                    if db.sku and db.sku.tier and db.sku.tier.lower() in ['basic', 'standard', 'premium']:
-                        dtu_dbs_to_check.append({'db': db, 'rg': rg_name})
-            except Exception as db_list_error:
-                 logging.warning(f"Could not list databases for server {server.name}. Error: {db_list_error}", exc_info=True)
-                 console.print(f"  - [yellow]Warning:[/yellow] Could not list databases for server {server.name}.")
-        
-        if not dtu_dbs_to_check: # Check if the filtered list is empty
-            console.print("  :information_source: No SQL Databases (DTU model) found to check metrics for.")
+            except IndexError:
+                logger.warning(f"Could not parse resource group for SQL server {server.name}. Skipping databases on this server.")
+                continue
+
+            databases = list(sql_client.databases.list_by_server(resource_group_name=rg_name, server_name=server.name))
+            for db in databases:
+                # Check if it's a DTU-based database
+                # Look at currentSku or requestedSku. DTU models are like Basic, Standard, Premium
+                # vCore models often have tier 'GeneralPurpose', 'BusinessCritical', 'Hyperscale'
+                # Elastic pools are handled separately or ignored for now.
+                is_dtu_model = False
+                if db.current_sku and db.current_sku.tier and db.current_sku.tier.lower() in ['basic', 'standard', 'premium']:
+                    is_dtu_model = True
+                elif hasattr(db, 'requested_sku') and db.requested_sku and db.requested_sku.tier and db.requested_sku.tier.lower() in ['basic', 'standard', 'premium']:
+                     is_dtu_model = True
+
+                # Also check for elastic pool - skip those for now
+                if db.elastic_pool_id:
+                     logger.debug(f"Skipping database {db.name} as it's in an elastic pool.")
+                     continue # Skip elastic pool databases for this specific check
+
+                if is_dtu_model:
+                    # Get server location if DB location is None (shouldn't happen often)
+                    db_location = db.location if db.location else server.location
+                    dbs_to_check.append((db, rg_name, server.name, db_location))
+
+        if not dbs_to_check:
+            console.print("  ℹ No SQL Databases (DTU model) found to check metrics for.")
             return []
-        else:
-             console.print(f"  - Found {len(dtu_dbs_to_check)} SQL Databases (DTU model) to analyze...")
 
-        # --- Query Metrics for Relevant DTU Databases ---
-        for db_info in dtu_dbs_to_check:
-            db = db_info['db']
-            rg_name = db_info['rg']
-            db_resource_uri = db.id
-            avg_dtu = None
-            metric_name = "dtu_consumption_percent"
+        console.print(f"  - Found {len(dbs_to_check)} SQL Databases (DTU model) to analyze...")
 
+        for db, rg_name, server_name, location in dbs_to_check:
+            db_resource_uri = db.id # For error reporting
+            db_name = db.name # For error reporting
+            db_details = None # Initialize
             try:
-                metrics_data = monitor_client.metrics.list(
-                    resource_uri=db_resource_uri,
-                    timespan=f"PT{lookback_days}D",
-                    interval="PT1H",
-                    metricnames=metric_name,
-                    aggregation="Average"
-                )
-                if metrics_data.value:
-                    metric = metrics_data.value[0]
-                    if metric.timeseries and metric.timeseries[0].data:
-                        total_dtu = 0
-                        count = 0
-                        for point in metric.timeseries[0].data:
-                            if point.average is not None:
-                                total_dtu += point.average
-                                count += 1
-                        if count > 0:
-                            avg_dtu = total_dtu / count
-                
-                db_details = {
-                    "name": db.name,
-                    "id": db.id,
-                    "resource_group": rg_name,
-                    "location": db.location,
-                    "avg_dtu_percent": avg_dtu,
-                    "tier": db.sku.tier if db.sku else "Unknown",
-                    "sku": db.sku.name if db.sku else "Unknown",
-                    "family": db.sku.family if db.sku else "Unknown",
-                    "capacity": db.sku.capacity if db.sku else "Unknown"
-                }
+                 db_details = {
+                     "name": db.name,
+                     "id": db.id,
+                     "resource_group": rg_name,
+                     "server_name": server_name,
+                     "location": location,
+                     "tier": db.current_sku.tier if db.current_sku else 'Unknown',
+                     "sku": db.current_sku.name if db.current_sku else 'Unknown',
+                     "family": db.current_sku.family if db.current_sku else None, # Family might be needed for pricing
+                     "capacity": db.current_sku.capacity if db.current_sku else None, # Capacity (DTUs)
+                     "avg_dtu_percent": None
+                 }
+                 avg_dtu = None
+                 # Metric name for DTU percentage
+                 metric_name = "dtu_consumption_percent"
 
-                if avg_dtu is not None:
-                    if avg_dtu < dtu_threshold_percent:
-                        low_dtu_dbs.append(db_details)
-                        console.print(f"  - [yellow]Low DTU DB:[/yellow] {db_details['name']} (Avg DTU: {avg_dtu:.2f}%, Tier: {db_details['tier']})")
-                    else:
-                        logging.info(f"SQL DB (DTU) {db_details['name']} DTU usage OK (Avg: {avg_dtu:.2f}%)")
-                else:
-                    logging.warning(f"No valid DTU metric data found for DB {db_details['name']} in the specified timespan.")
-                    console.print(f"  - [dim]No DTU data for DB:[/dim] {db_details['name']}")
+                 try:
+                     metrics_data = monitor_client.metrics.list(
+                         resource_uri=db_resource_uri,
+                         timespan=timespan, # Use correct timespan format
+                         interval="PT1H",
+                         metricnames=metric_name,
+                         aggregation="Average"
+                     )
 
-            except Exception as metric_error:
-                # Handle throttling
-                if "429" in str(metric_error) or "throttled" in str(metric_error).lower():
-                     logging.warning(f"Metrics query for SQL DB {db.name} on {rg_name} throttled. Skipping.")
-                     console.print(f"  - [yellow]Throttled:[/yellow] Skipping metrics for SQL DB {db.name} on {rg_name}.")
-                else:
-                     logging.warning(f"Could not get metrics for SQL DB {db.name} on {rg_name}. Error: {metric_error}", exc_info=True)
-                     console.print(f"  - [yellow]Warning:[/yellow] Could not get metrics for SQL DB {db.name} on {rg_name}.")
+                     if metrics_data and metrics_data.value:
+                         time_series = metrics_data.value[0].timeseries
+                         if time_series and time_series[0].data:
+                             valid_points = [d.average for d in time_series[0].data if d.average is not None]
+                             if valid_points:
+                                 avg_dtu = sum(valid_points) / len(valid_points)
+                                 db_details["avg_dtu_percent"] = avg_dtu
+                                 logger.debug(f"SQL DB (DTU) {db_name} on {server_name} avg DTU: {avg_dtu:.2f}%")
+                             else:
+                                  logger.warning(f"No valid data points found for metric '{metric_name}' for SQL DB (DTU) {db_name} on {server_name} in the timespan.")
+                         else:
+                              logger.warning(f"No time series data found for metric '{metric_name}' for SQL DB (DTU) {db_name} on {server_name} in the timespan.")
+                     else:
+                          logger.warning(f"No metric data returned for '{metric_name}' for SQL DB (DTU) {db_name} on {server_name}.")
+
+                 except HttpResponseError as metric_error:
+                      if metric_error.status_code == 429: # Too Many Requests
+                          logger.warning(f"Metrics query for SQL DB (DTU) {db_name} on {server_name} throttled. Skipping.")
+                          console.print(f"  - [yellow]Throttled:[/yellow] Skipping metrics for SQL DB {db_name} on {server_name}.")
+                      else:
+                          # Log other HTTP errors
+                          logger.warning(f"Could not get metrics for SQL DB (DTU) {db_name} on {server_name}. Error: {metric_error}", exc_info=True)
+                          console.print(f"  - [yellow]Warning:[/yellow] Could not get metrics for DTU SQL DB {db_name} on {server_name}.")
+                 except Exception as metric_error:
+                     logger.warning(f"Error processing metrics for SQL DB (DTU) {db_name} on {server_name}: {metric_error}", exc_info=True)
+                     console.print(f"  - [yellow]Warning:[/yellow] Error processing metrics for DTU SQL DB {db_name} on {server_name}.")
+
+                 if avg_dtu is not None:
+                     if avg_dtu < dtu_threshold_percent:
+                         console.print(f"  - [bold yellow]Low Usage:[/bold yellow] SQL DB {db_name} on {server_name} (Avg DTU: {avg_dtu:.1f}%) is below threshold ({dtu_threshold_percent}%).")
+                         low_dtu_dbs.append(db_details)
+                     else:
+                         logger.info(f"SQL DB (DTU) {db_name} on {server_name} DTU usage OK (Avg: {avg_dtu:.1f}%)")
+                 else:
+                     console.print(f"  - [dim]No DTU data for SQL DB:[/dim] {db_name} on {server_name}")
+
+            except Exception as e: # Catch errors in the outer loop for a specific DB
+                 logger.error(f"Error processing SQL DB (DTU) {db_name} on {server_name}: {e}", exc_info=True)
+                 console.print(f"  [red]Error:[/red] Could not process SQL DB {db_name} on {server_name}. Check logs.")
 
         console.print("\n--- SQL DTU Database Usage Analysis Summary ---")
-        if not low_dtu_dbs:
-            console.print(f"  :heavy_check_mark: No SQL DBs (DTU model) found with avg DTU < {dtu_threshold_percent}%.")
-        else:
+        if low_dtu_dbs:
             console.print(f"  :warning: Found {len(low_dtu_dbs)} SQL DB(s) (DTU model) with avg DTU < {dtu_threshold_percent}%.")
-        
-        return low_dtu_dbs
+        else:
+            console.print(f"  :heavy_check_mark: No SQL DBs (DTU model) found with avg DTU < {dtu_threshold_percent}%.")
 
     except Exception as e:
-        logging.error(f"Error checking for low DTU SQL Databases: {e}", exc_info=True)
+        logger.error(f"Error checking for low DTU SQL databases: {e}", exc_info=True)
         console.print(f"[bold red]Error checking for low DTU SQL Databases:[/] {e}")
-        return []
+    return low_dtu_dbs
 
 def find_low_cpu_sql_vcore_databases(credential, subscription_id, cpu_threshold_percent, lookback_days, console: Console):
-    """Finds SQL Databases (vCore model) with low average CPU usage."""
+    """Finds SQL Databases (vCore-based model) with low average CPU utilization."""
     logger = logging.getLogger()
     logger.info(f"📉 Checking SQL Databases (vCore model) for avg CPU < {cpu_threshold_percent}% over the last {lookback_days} days...")
-    console.print(f"\n📉 Checking SQL Databases (vCore model) for avg CPU < {cpu_threshold_percent}% over the last {lookback_days} days...") # Keep simple print
+    console.print(f"\n📉 Checking SQL Databases (vCore model) for avg CPU < {cpu_threshold_percent}% over the last {lookback_days} days...")
     low_cpu_dbs = []
-    vcore_dbs_to_check = [] # Initialize the list to check
-
+    monitor_client = None # Initialize outside try block
     try:
         sql_client = SqlManagementClient(credential, subscription_id)
         monitor_client = MonitorManagementClient(credential, subscription_id)
-        
+
+        # Get the correct timespan format
+        timespan = _get_iso8601_timespan(lookback_days)
+        logger.debug(f"Using timespan for SQL vCore metrics: {timespan}")
+
         servers = list(sql_client.servers.list())
+        dbs_to_check = []
+
+        # Iterate through servers to find databases
         for server in servers:
-             try:
-                rg_name = server.id.split('/')[4]
-                databases = list(sql_client.databases.list_by_server(rg_name, server.name))
-                for db in databases:
-                    # Check if it's a vCore model database (e.g., GeneralPurpose, BusinessCritical, Hyperscale)
-                    if db.sku and db.sku.tier and db.sku.tier.lower() not in ['basic', 'standard', 'premium', 'system']: # Exclude DTU and system
-                        vcore_dbs_to_check.append({'db': db, 'rg': rg_name})
-             except Exception as db_list_error:
-                 logging.warning(f"Could not list databases for server {server.name} (vCore check). Error: {db_list_error}", exc_info=True)
-                 console.print(f"  - [yellow]Warning:[/yellow] Could not list databases for server {server.name} (vCore check).")
-
-        if not vcore_dbs_to_check: # Check if the filtered list is empty
-            console.print("  :information_source: No SQL Databases (vCore model) found to check metrics for.")
-            return []
-        else:
-             console.print(f"  - Found {len(vcore_dbs_to_check)} SQL Databases (vCore model) to analyze...")
-
-        # --- Query Metrics for Relevant vCore Databases ---
-        for db_info in vcore_dbs_to_check:
-            db = db_info['db']
-            rg_name = db_info['rg']
-            db_resource_uri = db.id
-            avg_cpu = None
-            metric_name = "cpu_percent"
-
             try:
-                metrics_data = monitor_client.metrics.list(
-                    resource_uri=db_resource_uri,
-                    timespan=f"PT{lookback_days}D",
-                    interval="PT1H",
-                    metricnames=metric_name,
-                    aggregation="Average"
-                )
-                if metrics_data.value:
-                    metric = metrics_data.value[0]
-                    if metric.timeseries and metric.timeseries[0].data:
-                        total_cpu = 0
-                        count = 0
-                        for point in metric.timeseries[0].data:
-                            if point.average is not None:
-                                total_cpu += point.average
-                                count += 1
-                        if count > 0:
-                            avg_cpu = total_cpu / count
+                rg_name = server.id.split('/')[4]
+            except IndexError:
+                logger.warning(f"Could not parse resource group for SQL server {server.name}. Skipping databases on this server.")
+                continue
 
+            databases = list(sql_client.databases.list_by_server(resource_group_name=rg_name, server_name=server.name))
+            for db in databases:
+                 # Check if it's a vCore-based database
+                 is_vcore_model = False
+                 # vCore tiers often include 'GeneralPurpose', 'BusinessCritical', 'Hyperscale'
+                 # Or check if family indicates vCore (e.g., 'Gen5', 'M')
+                 if db.current_sku and db.current_sku.tier and db.current_sku.tier.lower() in ['generalpurpose', 'businesscritical', 'hyperscale']:
+                     is_vcore_model = True
+                 elif db.current_sku and db.current_sku.family and db.current_sku.family.lower() not in ['s', 'p', 'b']: # Exclude DTU families
+                      # Assume non-DTU family might be vCore (needs careful check)
+                      is_vcore_model = True # This might need refinement based on actual SKU families observed
+                 elif hasattr(db, 'requested_sku') and db.requested_sku and db.requested_sku.tier and db.requested_sku.tier.lower() in ['generalpurpose', 'businesscritical', 'hyperscale']:
+                      is_vcore_model = True
+
+                 # Skip elastic pools
+                 if db.elastic_pool_id:
+                     logger.debug(f"Skipping database {db.name} as it's in an elastic pool.")
+                     continue
+
+                 if is_vcore_model:
+                     db_location = db.location if db.location else server.location
+                     dbs_to_check.append((db, rg_name, server.name, db_location))
+
+        if not dbs_to_check:
+            console.print("  ℹ No SQL Databases (vCore model) found to check metrics for.")
+            return []
+
+        console.print(f"  - Found {len(dbs_to_check)} SQL Databases (vCore model) to analyze...")
+
+        for db, rg_name, server_name, location in dbs_to_check:
+            db_resource_uri = db.id # For error reporting
+            db_name = db.name # For error reporting
+            db_details = None # Initialize
+            try:
                 db_details = {
                     "name": db.name,
                     "id": db.id,
                     "resource_group": rg_name,
-                    "location": db.location,
-                    "avg_cpu_percent": avg_cpu,
-                    "tier": db.sku.tier if db.sku else "Unknown",
-                    "sku": db.sku.name if db.sku else "Unknown",
-                    "family": db.sku.family if db.sku else "Unknown",
-                    "capacity": db.sku.capacity if db.sku else "Unknown"
+                    "server_name": server_name,
+                    "location": location,
+                    "tier": db.current_sku.tier if db.current_sku else 'Unknown',
+                    "sku": db.current_sku.name if db.current_sku else 'Unknown',
+                    "family": db.current_sku.family if db.current_sku else None, # e.g., Gen5
+                    "capacity": db.current_sku.capacity if db.current_sku else None, # e.g., vCores
+                    "avg_cpu_percent": None
                 }
+                avg_cpu = None
+                # Metric name for vCore CPU percentage
+                metric_name = "cpu_percent"
+
+                try:
+                    metrics_data = monitor_client.metrics.list(
+                        resource_uri=db_resource_uri,
+                        timespan=timespan, # Use correct timespan format
+                        interval="PT1H",
+                        metricnames=metric_name,
+                        aggregation="Average"
+                    )
+
+                    if metrics_data and metrics_data.value:
+                         valid_points = [d.average for d in metrics_data.value[0].timeseries[0].data if d.average is not None]
+                         if valid_points:
+                             avg_cpu = sum(valid_points) / len(valid_points)
+                             db_details["avg_cpu_percent"] = avg_cpu
+                             logger.debug(f"SQL DB (vCore) {db_name} on {server_name} avg CPU: {avg_cpu:.2f}%")
+                         else:
+                              logger.warning(f"No valid data points found for metric '{metric_name}' for SQL DB (vCore) {db_name} on {server_name} in the timespan.")
+                    else:
+                         logger.warning(f"No metric data returned for '{metric_name}' for SQL DB (vCore) {db_name} on {server_name}.")
+
+                except HttpResponseError as metric_error:
+                     # Check for specific "Metric configuration not found" error
+                     is_metric_not_found_error = (
+                         metric_error.status_code == 400 and
+                         metric_error.error and
+                         hasattr(metric_error.error, 'message') and
+                         metric_error.error.message and
+                         "failed to find metric configuration" in metric_error.error.message.lower()
+                     )
+
+                     if is_metric_not_found_error:
+                         # Log a concise warning and continue gracefully
+                         logger.warning(f"Metric '{metric_name}' not found for SQL DB (vCore) {db_name} on {server_name}. It might need to be enabled in Diagnostics settings.")
+                         console.print(f"  - [yellow]Warning:[/yellow] Metric '{metric_name}' not found for SQL DB (vCore) {db_name} on {server_name}. (Enable in Diagnostics?)")
+                     elif metric_error.status_code == 429: # Too Many Requests
+                         logger.warning(f"Metrics query for SQL DB (vCore) {db_name} on {server_name} throttled. Skipping.")
+                         console.print(f"  - [yellow]Throttled:[/yellow] Skipping metrics for SQL DB {db_name} on {server_name}.")
+                     else:
+                         # Log other HTTP errors with traceback for debugging
+                         logger.warning(f"Could not get metrics for SQL DB (vCore) {db_name} on {server_name}. Error: {metric_error}", exc_info=True)
+                         console.print(f"  - [yellow]Warning:[/yellow] Could not get metrics for vCore SQL DB {db_name} on {server_name} (Error: {metric_error.status_code}). Check logs.")
+                except Exception as metric_error:
+                    # Log other unexpected errors during metric processing
+                    logger.warning(f"Error processing metrics for SQL DB (vCore) {db_name} on {server_name}: {metric_error}", exc_info=True)
+                    console.print(f"  - [yellow]Warning:[/yellow] Error processing metrics for vCore SQL DB {db_name} on {server_name}. Check logs.")
+
 
                 if avg_cpu is not None:
                     if avg_cpu < cpu_threshold_percent:
+                        console.print(f"  - [bold yellow]Low Usage:[/bold yellow] SQL DB {db_name} on {server_name} (Avg CPU: {avg_cpu:.1f}%) is below threshold ({cpu_threshold_percent}%).")
                         low_cpu_dbs.append(db_details)
-                        console.print(f"  - [yellow]Low CPU vCore DB:[/yellow] {db_details['name']} (Avg CPU: {avg_cpu:.2f}%, Tier: {db_details['tier']})")
                     else:
-                        logging.info(f"SQL DB (vCore) {db_details['name']} CPU usage OK (Avg: {avg_cpu:.2f}%)")
+                         logger.info(f"SQL DB (vCore) {db_name} on {server_name} CPU usage OK (Avg: {avg_cpu:.1f}%)")
                 else:
-                    logging.warning(f"No valid CPU metric data found for vCore DB {db_details['name']} in the specified timespan.")
-                    console.print(f"  - [dim]No CPU data for vCore DB:[/dim] {db_details['name']}")
+                    console.print(f"  - [dim]No CPU data for vCore SQL DB:[/dim] {db_name} on {server_name}")
 
-            except Exception as metric_error:
-                # Handle throttling
-                if "429" in str(metric_error) or "throttled" in str(metric_error).lower():
-                     logging.warning(f"Metrics query for SQL DB (vCore) {db.name} on {rg_name} throttled. Skipping.")
-                     console.print(f"  - [yellow]Throttled:[/yellow] Skipping metrics for vCore SQL DB {db.name} on {rg_name}.")
-                else:
-                     logging.warning(f"Could not get metrics for SQL DB (vCore) {db.name} on {rg_name}. Error: {metric_error}", exc_info=True)
-                     console.print(f"  - [yellow]Warning:[/yellow] Could not get metrics for vCore SQL DB {db.name} on {rg_name}.")
+            except Exception as e: # Catch errors in the outer loop for a specific DB
+                logger.error(f"Error processing SQL DB (vCore) {db_name} on {server_name}: {e}", exc_info=True)
+                console.print(f"  [red]Error:[/red] Could not process SQL DB {db_name} on {server_name}. Check logs.")
 
         console.print("\n--- SQL vCore Database Usage Analysis Summary ---")
-        if not low_cpu_dbs:
-             console.print(f"  :heavy_check_mark: No SQL DBs (vCore model) found with avg CPU < {cpu_threshold_percent}%.")
+        if low_cpu_dbs:
+            console.print(f"  :warning: Found {len(low_cpu_dbs)} SQL DB(s) (vCore model) with avg CPU < {cpu_threshold_percent}%.")
         else:
-             console.print(f"  :warning: Found {len(low_cpu_dbs)} SQL DB(s) (vCore model) with avg CPU < {cpu_threshold_percent}%.")
-
-        return low_cpu_dbs
+            console.print(f"  :heavy_check_mark: No SQL DBs (vCore model) found with avg CPU < {cpu_threshold_percent}%.")
 
     except Exception as e:
-        logging.error(f"Error checking for low CPU vCore SQL Databases: {e}", exc_info=True)
+        logger.error(f"Error checking for low CPU vCore SQL databases: {e}", exc_info=True)
         console.print(f"[bold red]Error checking for low CPU vCore SQL Databases:[/] {e}")
-        return []
+    return low_cpu_dbs
 
-# --- Add Idle Application Gateway Detection ---
 def find_idle_application_gateways(credential, subscription_id, lookback_days, idle_connection_threshold, console: Console):
-    """Finds Application Gateways with low average connections over a period."""
+    """Finds Application Gateways with average current connections below a threshold."""
     logger = logging.getLogger()
     logger.info(f"🚥 Checking Application Gateways for avg current connections < {idle_connection_threshold} over the last {lookback_days} days...")
     console.print(f"\n🚥 Checking Application Gateways for avg current connections < {idle_connection_threshold} over the last {lookback_days} days...")
     idle_gateways = []
-
+    monitor_client = None # Initialize outside try block
     try:
         network_client = NetworkManagementClient(credential, subscription_id)
         monitor_client = MonitorManagementClient(credential, subscription_id)
 
-        # --- Calculate timespan in ISO 8601 format ---
-        end_time = datetime.now(timezone.utc)
-        start_time = end_time - timedelta(days=lookback_days)
-        # Format specifically for Azure Monitor API (YYYY-MM-DDTHH:MM:SSZ)
-        timespan_iso = f"{start_time.strftime('%Y-%m-%dT%H:%M:%SZ')}/{end_time.strftime('%Y-%m-%dT%H:%M:%SZ')}"
-        # ---
+        # Get the correct timespan format
+        timespan = _get_iso8601_timespan(lookback_days)
+        logger.debug(f"Using timespan for App Gateway metrics: {timespan}")
 
         gateways = list(network_client.application_gateways.list_all())
 
         if not gateways:
-             console.print("  :information_source: No Application Gateways found in the subscription.")
-             return []
-        else:
-             gateways_to_check = gateways # Assign the list to check
-             console.print(f"  - Found {len(gateways_to_check)} Application Gateways to analyze...")
+            console.print("  ℹ No Application Gateways found to analyze.")
+            return []
 
-        # --- Query Metrics for Gateways ---
-        for gateway in gateways_to_check:
-            gw_resource_uri = gateway.id
-            avg_connections = None
-            metric_name = "CurrentConnections" # Or Throughput? Connections is more direct for 'idle'
+        console.print(f"  - Found {len(gateways)} Application Gateways to analyze...")
 
+        for gw in gateways:
+            gw_resource_uri = gw.id # For error reporting
+            gw_name = gw.name # For error reporting
+            gw_details = None # Initialize
             try:
-                metrics_data = monitor_client.metrics.list(
-                    resource_uri=gw_resource_uri,
-                    timespan=timespan_iso, # Use ISO 8601 format
-                    interval="PT1H",
-                    metricnames=metric_name,
-                    aggregation="Average"
-                )
-                if metrics_data.value:
-                    metric = metrics_data.value[0]
-                    if metric.timeseries and metric.timeseries[0].data:
-                        total_conn = 0
-                        count = 0
-                        for point in metric.timeseries[0].data:
-                            if point.average is not None:
-                                total_conn += point.average
-                                count += 1
-                        if count > 0:
-                            avg_connections = total_conn / count
-                
-                gw_details = {
-                    "name": gateway.name,
-                    "id": gateway.id,
-                    "resource_group": gateway.id.split('/')[4],
-                    "location": gateway.location,
-                    "avg_connections": avg_connections,
-                    "sku": gateway.sku.name if gateway.sku else "Unknown",
-                    "tier": gateway.sku.tier if gateway.sku else "Unknown"
-                }
+                 # Extract RG name safely
+                 rg_name = None
+                 try:
+                     rg_name = gw.id.split('/')[4]
+                 except IndexError:
+                     logger.warning(f"Could not parse resource group for App Gateway {gw_name}. Skipping metrics check.")
+                     continue
 
-                if avg_connections is not None:
-                    if avg_connections < idle_connection_threshold:
-                        idle_gateways.append(gw_details)
-                        console.print(f"  - [yellow]Idle App Gateway:[/yellow] {gw_details['name']} (Avg Connections: {avg_connections:.2f}, SKU: {gw_details['sku']})")
-                    else:
-                        logging.info(f"App Gateway {gw_details['name']} connection usage OK (Avg: {avg_connections:.2f})")
-                else:
-                     logging.warning(f"No valid connection metric data found for App Gateway {gw_details['name']} in the specified timespan.")
-                     console.print(f"  - [dim]No connection data for App Gateway:[/dim] {gw_details['name']}")
-            
-            except Exception as metric_error:
-                # Handle throttling
-                if "429" in str(metric_error) or "throttled" in str(metric_error).lower():
-                     logging.warning(f"Metrics query for App Gateway {gateway.name} throttled. Skipping.")
-                     console.print(f"  - [yellow]Throttled:[/yellow] Skipping metrics for App Gateway {gateway.name}.")
-                else:
-                     logging.warning(f"Could not get metrics for App Gateway {gateway.name}. Error: {metric_error}", exc_info=True)
-                     console.print(f"  - [yellow]Warning:[/yellow] Could not get metrics for App Gateway {gateway.name}.")
+                 gw_details = {
+                     "name": gw.name,
+                     "id": gw.id,
+                     "resource_group": rg_name,
+                     "location": gw.location,
+                     "tier": gw.sku.tier if gw.sku else 'Unknown',
+                     "sku": gw.sku.name if gw.sku else 'Unknown',
+                     "avg_current_connections": None
+                 }
+                 avg_connections = None
+                 # Metric for current connections (adjust if needed based on exact metric name)
+                 # Common names: 'CurrentConnections', 'TotalRequests', 'Throughput'
+                 # Let's use 'CurrentConnections' as a likely candidate for 'idle'
+                 metric_name = "CurrentConnections"
+
+                 try:
+                     metrics_data = monitor_client.metrics.list(
+                         resource_uri=gw_resource_uri,
+                         timespan=timespan, # Use correct timespan format
+                         interval="PT1H",
+                         metricnames=metric_name,
+                         aggregation="Average"
+                     )
+
+                     if metrics_data and metrics_data.value:
+                         time_series = metrics_data.value[0].timeseries
+                         if time_series and time_series[0].data:
+                             valid_points = [d.average for d in time_series[0].data if d.average is not None]
+                             if valid_points:
+                                 avg_connections = sum(valid_points) / len(valid_points)
+                                 gw_details["avg_current_connections"] = avg_connections
+                                 logger.debug(f"App Gateway {gw_name} avg connections: {avg_connections:.2f}")
+                             else:
+                                  logger.warning(f"No valid data points found for metric '{metric_name}' for App Gateway {gw_name} in the timespan.")
+                         else:
+                              logger.warning(f"No time series data found for metric '{metric_name}' for App Gateway {gw_name} in the timespan.")
+                     else:
+                          logger.warning(f"No metric data returned for '{metric_name}' for App Gateway {gw_name}.")
+
+                 except HttpResponseError as metric_error:
+                      if metric_error.status_code == 429: # Too Many Requests
+                          logger.warning(f"Metrics query for App Gateway {gw_name} throttled. Skipping.")
+                          console.print(f"  - [yellow]Throttled:[/yellow] Skipping metrics for App Gateway {gw_name}.")
+                      else:
+                          # Log other HTTP errors
+                          logger.warning(f"Could not get metrics for App Gateway {gw_name}. Error: {metric_error}", exc_info=True)
+                          console.print(f"  - [yellow]Warning:[/yellow] Could not get metrics for App Gateway {gw_name}.")
+                 except Exception as metric_error:
+                     logger.warning(f"Error processing metrics for App Gateway {gw_name}: {metric_error}", exc_info=True)
+                     console.print(f"  - [yellow]Warning:[/yellow] Error processing metrics for App Gateway {gw_name}.")
+
+                 if avg_connections is not None:
+                     if avg_connections < idle_connection_threshold:
+                         console.print(f"  - [bold yellow]Idle:[/bold yellow] App Gateway {gw_name} (Avg Connections: {avg_connections:.1f}) is below threshold ({idle_connection_threshold}).")
+                         idle_gateways.append(gw_details)
+                     else:
+                          logger.info(f"App Gateway {gw_name} connection usage OK (Avg: {avg_connections:.1f})")
+                 else:
+                     console.print(f"  - [dim]No connection data for App Gateway:[/dim] {gw_name}")
+
+            except Exception as e: # Catch errors in the outer loop for a specific Gateway
+                logger.error(f"Error processing App Gateway {gw_name}: {e}", exc_info=True)
+                console.print(f"  [red]Error:[/red] Could not process App Gateway {gw_name}. Check logs.")
 
         console.print("\n--- Application Gateway Usage Analysis Summary ---")
-        if not idle_gateways:
-             console.print(f"  :heavy_check_mark: No Application Gateways found with avg connections < {idle_connection_threshold}.")
+        if idle_gateways:
+            console.print(f"  :warning: Found {len(idle_gateways)} Application Gateway(s) with avg connections < {idle_connection_threshold}.")
         else:
-             console.print(f"  :warning: Found {len(idle_gateways)} Application Gateway(s) with avg connections < {idle_connection_threshold}.")
-
-        return idle_gateways
+            console.print(f"  :heavy_check_mark: No Application Gateways found with avg connections < {idle_connection_threshold}.")
 
     except Exception as e:
-        logging.error(f"Error checking for idle Application Gateways: {e}", exc_info=True)
+        logger.error(f"Error checking for idle Application Gateways: {e}", exc_info=True)
         console.print(f"[bold red]Error checking for idle Application Gateways:[/] {e}")
-        return []
+    return idle_gateways
 
-# --- Add Low Usage Web App Detection ---
 def find_low_usage_web_apps(credential, subscription_id, cpu_threshold_percent, lookback_days, console: Console):
-    """Finds individual Web Apps (on Basic+ plans) with low average CPU usage."""
+    """Finds Web Apps (running on Basic+ plans) with low average CPU utilization."""
     logger = logging.getLogger()
     logger.info(f"💻 Checking Web Apps (on Basic+ plans) for avg CPU < {cpu_threshold_percent}% over the last {lookback_days} days...")
-    console.print(f"\n💻 Checking Web Apps (on Basic+ plans) for avg CPU < {cpu_threshold_percent}% over the last {lookback_days} days...") # Keep simple print
+    console.print(f"\n💻 Checking Web Apps (on Basic+ plans) for avg CPU < {cpu_threshold_percent}% over the last {lookback_days} days...")
     low_usage_apps = []
-    apps_to_check = [] # Initialize list to check
-
+    monitor_client = None # Initialize outside try block
     try:
         web_client = WebSiteManagementClient(credential, subscription_id)
         monitor_client = MonitorManagementClient(credential, subscription_id)
-        
-        apps = list(web_client.web_apps.list())
-        plans = {plan.id.lower(): plan for plan in web_client.app_service_plans.list()}
 
-        for app in apps:
-            try:
-                plan_id = app.server_farm_id
-                if plan_id and plan_id.lower() in plans:
-                    plan = plans[plan_id.lower()]
-                    # Check if the plan is in a relevant tier
-                    if plan.sku and plan.sku.tier and plan.sku.tier.lower() not in ['free', 'shared', 'dynamic']:
-                        apps_to_check.append({'app': app, 'plan': plan}) # Store app and its plan
-                else:
-                    logging.debug(f"App {app.name} has no plan ID or plan not found in cache. Skipping.")
-            except Exception as plan_check_error:
-                logging.warning(f"Error checking plan for app {app.name}: {plan_check_error}", exc_info=True)
+        # Get the correct timespan format
+        timespan = _get_iso8601_timespan(lookback_days)
+        logger.debug(f"Using timespan for Web App metrics: {timespan}")
 
-        if not apps_to_check: # Check filtered list
-            console.print("  :information_source: No running Web Apps (on Basic+ plans) found to check metrics for.")
+        web_apps = list(web_client.web_apps.list())
+        apps_to_check = []
+        plan_cache = {} # Cache plan details to avoid redundant lookups
+
+        console.print(f"  - Found {len(web_apps)} total Web Apps. Analyzing those on Basic+ plans...")
+        # Filter apps based on their App Service Plan tier
+        for app in web_apps:
+            # Check if app has a valid server farm ID
+            if not app.server_farm_id:
+                 logger.debug(f"Skipping Web App {app.name} as it has no associated App Service Plan ID.")
+                 continue
+
+            plan_id = app.server_farm_id
+            plan_info = plan_cache.get(plan_id)
+
+            if not plan_info:
+                try:
+                    # Extract plan RG and name from ID
+                    parts = plan_id.split('/')
+                    plan_rg = parts[4]
+                    plan_name = parts[8]
+                    plan = web_client.app_service_plans.get(plan_rg, plan_name)
+                    if plan and plan.sku and plan.sku.tier:
+                        plan_info = {'tier': plan.sku.tier.lower(), 'name': plan.name}
+                        plan_cache[plan_id] = plan_info
+                    else:
+                        plan_cache[plan_id] = {'tier': 'unknown', 'name': plan_name} # Cache unknown tier
+                        logger.warning(f"Could not determine tier for plan {plan_name} ({plan_id}). Skipping apps on this plan.")
+                        continue
+                except Exception as plan_err:
+                    logger.error(f"Error fetching details for plan {plan_id} for app {app.name}: {plan_err}", exc_info=True)
+                    plan_cache[plan_id] = {'tier': 'error', 'name': 'Unknown'} # Cache error state
+                    console.print(f"  [yellow]Warning:[/yellow] Could not get plan details for app {app.name}. Skipping.")
+                    continue
+
+            # Check if the plan tier is relevant (Basic or higher)
+            if plan_info and plan_info.get('tier') not in ['free', 'shared', 'dynamic', 'unknown', 'error']:
+                apps_to_check.append((app, plan_info)) # Append app and its cached plan info
+
+        if not apps_to_check:
+            console.print("  ℹ No Web Apps found running on relevant App Service Plans (Basic or higher).")
             return []
-        else:
-             console.print(f"  - Found {len(apps_to_check)} Web Apps (on Basic+ plans) to analyze...")
 
-        # --- Query Metrics for Relevant Web Apps ---
-        for app_info in apps_to_check:
-            app = app_info['app']
-            plan = app_info['plan'] # Get the associated plan
-            app_resource_uri = app.id
-            avg_cpu_percent = None
-            metric_name = "CpuTime" # For Web Apps, it's often CpuTime (total seconds), need conversion or use Percentage CPU if available
+        console.print(f"  - Found {len(apps_to_check)} Web Apps (on Basic+ plans) to analyze...")
 
+        for app, plan_info in apps_to_check:
+            app_resource_uri = app.id # For error reporting
+            app_name = app.name # For error reporting
+            app_details = None # Initialize
             try:
-                # Attempt Percentage CPU first as it's simpler
-                metrics_data = monitor_client.metrics.list(
-                    resource_uri=app_resource_uri,
-                    timespan=f"PT{lookback_days}D",
-                    interval="PT1H",
-                    metricnames="Percentage CPU", # Try this metric first
-                    aggregation="Average"
-                )
-                
-                if metrics_data.value:
-                    metric = metrics_data.value[0]
-                    if metric.timeseries and metric.timeseries[0].data:
-                        total_cpu = 0
-                        count = 0
-                        for point in metric.timeseries[0].data:
-                             if point.average is not None:
-                                total_cpu += point.average
-                                count += 1
-                        if count > 0:
-                            avg_cpu_percent = total_cpu / count
-                
-                # Fallback to CpuTime if Percentage CPU not found or no data
-                if avg_cpu_percent is None:
-                    logging.debug(f"Metric 'Percentage CPU' not found for app {app.name}. Trying 'CpuTime'.")
-                    metrics_data_cpu_time = monitor_client.metrics.list(
-                        resource_uri=app_resource_uri,
-                        timespan=f"PT{lookback_days}D",
-                        interval="PT1H",
-                        metricnames="CpuTime", 
-                        aggregation="Total" # Total CPU seconds per hour
-                    )
-                    if metrics_data_cpu_time.value:
-                        metric = metrics_data_cpu_time.value[0]
-                        if metric.timeseries and metric.timeseries[0].data:
-                            total_cpu_seconds = 0
-                            total_intervals = 0
-                            for point in metric.timeseries[0].data:
-                                if point.total is not None:
-                                    total_cpu_seconds += point.total
-                                    total_intervals += 1
-                            if total_intervals > 0:
-                                # Estimate %: (Total CPU seconds / (Total Intervals * 3600 seconds/hour)) * 100
-                                # This needs # cores, which isn't easily available. 
-                                # Approximate based on time active? Or just report low absolute CpuTime?
-                                # For now, let's flag if average hourly CpuTime is very low (e.g., < 36 seconds = 1% of an hour)
-                                avg_cpu_seconds_per_hour = total_cpu_seconds / total_intervals
-                                if avg_cpu_seconds_per_hour < 36: # Arbitrary threshold for low absolute usage
-                                     avg_cpu_percent = 0.5 # Assign a low % value for flagging
-                                else:
-                                     avg_cpu_percent = 100 # Assign high value if not very low absolute
+                # Extract RG name safely
+                rg_name = None
+                try:
+                    rg_name = app.id.split('/')[4]
+                except IndexError:
+                    logger.warning(f"Could not parse resource group for Web App {app_name}. Skipping metrics check.")
+                    continue
 
                 app_details = {
-                    "name": app.name,
-                    "id": app.id,
-                    "resource_group": app.id.split('/')[4],
-                    "location": app.location,
-                    "avg_cpu_percent": avg_cpu_percent,
-                    "plan_name": plan.name,
-                    "plan_tier": plan.sku.tier if plan.sku else "Unknown",
+                     "name": app.name,
+                     "id": app.id,
+                     "resource_group": rg_name,
+                     "location": app.location,
+                     "plan_name": plan_info.get('name', 'Unknown'),
+                     "plan_tier": plan_info.get('tier', 'Unknown').capitalize(), # Capitalize tier for display
+                     "avg_cpu_percent": None
                 }
+                avg_cpu = None
+                # Metrics for Web Apps can be 'CpuTime' (total seconds) or 'AverageCpuPercentage' (often requires specific diagnostics settings)
+                # Let's try 'CpuTime' and calculate percentage based on plan capacity if needed, or use 'AverageCpuPercentage' if available
+                # Preferred metric name: 'AverageCpuPercentage' (if enabled via Diagnostics) or 'CpuPercentage'
+                metric_name = "CpuPercentage" # Common metric for Web App CPU %
 
-                if avg_cpu_percent is not None:
-                    if avg_cpu_percent < cpu_threshold_percent:
-                        low_usage_apps.append(app_details)
-                        console.print(f"  - [yellow]Low CPU Web App:[/yellow] {app_details['name']} (Avg CPU: {avg_cpu_percent:.2f}%, Plan: {app_details['plan_name']})")
+                try:
+                    metrics_data = monitor_client.metrics.list(
+                        resource_uri=app_resource_uri,
+                        timespan=timespan, # Use correct timespan format
+                        interval="PT1H",
+                        metricnames=metric_name,
+                        aggregation="Average"
+                    )
+                    # Process metrics_data if successful
+                    if metrics_data and metrics_data.value:
+                         valid_points = [d.average for d in metrics_data.value[0].timeseries[0].data if d.average is not None]
+                         if valid_points:
+                             avg_cpu = sum(valid_points) / len(valid_points)
+                             app_details["avg_cpu_percent"] = avg_cpu
+                             logger.debug(f"Web App {app_name} avg CPU: {avg_cpu:.2f}%")
+                         else:
+                              logger.warning(f"No valid data points found for metric '{metric_name}' for Web App {app_name} in the timespan.")
                     else:
-                        logging.info(f"Web App {app_details['name']} CPU usage OK (Avg: {avg_cpu_percent:.2f}%)")
+                         logger.warning(f"No metric data returned for '{metric_name}' for Web App {app_name}.")
+
+                except HttpResponseError as metric_error:
+                     # Check for specific "Metric configuration not found" error
+                     is_metric_not_found_error = (
+                         metric_error.status_code == 400 and
+                         metric_error.error and
+                         hasattr(metric_error.error, 'message') and
+                         metric_error.error.message and
+                         "failed to find metric configuration" in metric_error.error.message.lower()
+                     )
+
+                     if is_metric_not_found_error:
+                         # Log a concise warning and continue gracefully
+                         logger.warning(f"Metric '{metric_name}' not found for Web App {app_name}. It might need to be enabled in Diagnostics settings.")
+                         console.print(f"  - [yellow]Warning:[/yellow] Metric '{metric_name}' not found for Web App {app_name}. (Enable in Diagnostics?)")
+                     elif metric_error.status_code == 429: # Too Many Requests
+                         logger.warning(f"Metrics query for Web App {app_name} throttled. Skipping.")
+                         console.print(f"  - [yellow]Throttled:[/yellow] Skipping metrics for Web App {app_name}.")
+                     else:
+                         # Log other HTTP errors with traceback for debugging
+                         logger.warning(f"Could not get metrics for Web App {app_name}. Error: {metric_error}", exc_info=True)
+                         console.print(f"  - [yellow]Warning:[/yellow] Could not get metrics for Web App {app_name} (Error: {metric_error.status_code}). Check logs.")
+                except Exception as metric_error:
+                    # Log other unexpected errors during metric processing
+                    logger.warning(f"Error processing metrics for Web App {app_name}: {metric_error}", exc_info=True)
+                    console.print(f"  - [yellow]Warning:[/yellow] Error processing metrics for Web App {app_name}. Check logs.")
+
+
+                if avg_cpu is not None:
+                    if avg_cpu < cpu_threshold_percent:
+                        console.print(f"  - [bold yellow]Low Usage:[/bold yellow] Web App {app_name} (Avg CPU: {avg_cpu:.1f}%) is below threshold ({cpu_threshold_percent}%).")
+                        low_usage_apps.append(app_details)
+                    else:
+                         logger.info(f"Web App {app_name} CPU usage OK (Avg: {avg_cpu:.1f}%)")
                 else:
-                    logging.warning(f"No valid CPU metric data found for Web App {app_details['name']} in the specified timespan.")
-                    console.print(f"  - [dim]No CPU data for Web App:[/dim] {app_details['name']}")
+                    console.print(f"  - [dim]No CPU data for Web App:[/dim] {app_name}")
 
-            except Exception as metric_error:
-                # Handle throttling
-                if "429" in str(metric_error) or "throttled" in str(metric_error).lower():
-                     logging.warning(f"Metrics query for Web App {app.name} throttled. Skipping.")
-                     console.print(f"  - [yellow]Throttled:[/yellow] Skipping metrics for Web App {app.name}.")
-                else:
-                     logging.warning(f"Could not get metrics for Web App {app.name}. Error: {metric_error}", exc_info=True)
-                     console.print(f"  - [yellow]Warning:[/yellow] Could not get metrics for Web App {app.name}.")
+            except Exception as e: # Catch errors in the outer loop for a specific App
+                logger.error(f"Error processing Web App {app_name}: {e}", exc_info=True)
+                console.print(f"  [red]Error:[/red] Could not process Web App {app_name}. Check logs.")
 
-
-        # ... Summary printing ...
         console.print("\n--- Web App Usage Analysis Summary ---")
-        if not low_usage_apps:
-            console.print(f"  :heavy_check_mark: No running Web Apps (on Basic+ plans) found with avg CPU < {cpu_threshold_percent}%.")
+        if low_usage_apps:
+            console.print(f"  :warning: Found {len(low_usage_apps)} Web App(s) (on Basic+ plans) with avg CPU < {cpu_threshold_percent}%.")
         else:
-            console.print(f"  :warning: Found {len(low_usage_apps)} running Web App(s) (on Basic+ plans) with avg CPU < {cpu_threshold_percent}%.")
-
-        return low_usage_apps
+            console.print(f"  :heavy_check_mark: No running Web Apps (on Basic+ plans) found with avg CPU < {cpu_threshold_percent}%.")
 
     except Exception as e:
-        logging.error(f"Error checking for low usage Web Apps: {e}", exc_info=True)
+        logger.error(f"Error checking for low usage Web Apps: {e}", exc_info=True)
         console.print(f"[bold red]Error checking for low usage Web Apps:[/] {e}")
-        return []
+    return low_usage_apps
 
-# --- Add Orphaned NSG Detection ---
 def find_orphaned_nsgs(credential, subscription_id, console: Console):
     """Finds Network Security Groups not associated with any NIC or subnet."""
     logger = logging.getLogger()
@@ -1134,7 +1328,6 @@ def find_orphaned_nsgs(credential, subscription_id, console: Console):
         console.print(f"[bold red]Error checking for orphaned NSGs:[/bold red] {e}")
         return []
 
-# --- Add Orphaned Route Table Detection ---
 def find_orphaned_route_tables(credential, subscription_id, console: Console):
     """Finds Route Tables not associated with any subnet."""
     logger = logging.getLogger()
