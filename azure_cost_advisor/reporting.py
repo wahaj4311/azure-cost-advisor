@@ -208,11 +208,11 @@ def generate_html_report_content(
     # Structure: df_to_html_card(dataframe, title, card_id, icon, optional_description)
     html += df_to_html_card(unattached_disks_df, "Unattached Disks", "unattached-disks", "bi-hdd-stack", "Disks not connected to any Virtual Machine.")
     html += df_to_html_card(stopped_vms_df, "Stopped VMs (Not Deallocated)", "stopped-vms", "bi-stop-circle-fill", "VMs stopped from the OS but still incurring compute costs.")
-    html += df_to_html_card(unused_public_ips_df, "Unused Public IPs", "unused-ips", "bi-globe2", "Static Public IP addresses not associated with any running service.")
+    html += df_to_html_card(unused_public_ips_df, "Unused Public IP Addresses", "unused-ips", "bi-globe2", "Static Public IP addresses not associated with any running service.")
     html += df_to_html_card(empty_resource_groups_df, "Empty Resource Groups", "empty-rgs", "bi-trash3-fill", "Resource groups containing no resources.")
     html += df_to_html_card(empty_plans_df, "Empty App Service Plans", "empty-asps", "bi-file-earmark-excel-fill", "App Service Plans with no deployed applications.")
     html += df_to_html_card(old_snapshots_df, f"Old Snapshots (> {SNAPSHOT_AGE_THRESHOLD_DAYS} days)", "old-snapshots", "bi-camera-fill", "Disk snapshots older than the configured threshold.")
-    html += df_to_html_card(low_cpu_vms_df, f"Low CPU VMs (< {LOW_CPU_THRESHOLD_PERCENT}% Avg)", "low-cpu-vms", "bi-pc-display", f"Running VMs with average CPU usage below {LOW_CPU_THRESHOLD_PERCENT}% over the last {METRIC_LOOKBACK_DAYS} days.")
+    html += df_to_html_card(low_cpu_vms_df, f"Low CPU Virtual Machines (< {LOW_CPU_THRESHOLD_PERCENT}% Avg)", "low-cpu-vms", "bi-pc-display", f"Running VMs with average CPU usage below {LOW_CPU_THRESHOLD_PERCENT}% over the last {METRIC_LOOKBACK_DAYS} days.")
     html += df_to_html_card(low_usage_app_service_plans_df, f"Low CPU App Service Plans (< {APP_SERVICE_PLAN_LOW_CPU_THRESHOLD_PERCENT}% Avg)", "low-asps", "bi-server", f"App Service Plans (Basic+ tier) with average CPU below {APP_SERVICE_PLAN_LOW_CPU_THRESHOLD_PERCENT}% over the last {METRIC_LOOKBACK_DAYS} days.")
     html += df_to_html_card(low_dtu_dbs_df, f"Low DTU SQL Databases (< {SQL_DB_LOW_DTU_THRESHOLD_PERCENT}% Avg)", "low-dtu-dbs", "bi-database-fill-down", f"SQL Databases (DTU model) with average DTU usage below {SQL_DB_LOW_DTU_THRESHOLD_PERCENT}% over the last {METRIC_LOOKBACK_DAYS} days.")
     html += df_to_html_card(low_cpu_vcore_dbs_df, f"Low CPU vCore SQL Databases (< {SQL_VCORE_LOW_CPU_THRESHOLD_PERCENT}% Avg)", "low-vcore-dbs", "bi-database-fill-gear", f"SQL Databases (vCore model) with average CPU usage below {SQL_VCORE_LOW_CPU_THRESHOLD_PERCENT}% over the last {METRIC_LOOKBACK_DAYS} days.")
@@ -224,8 +224,32 @@ def generate_html_report_content(
     # Add Potential Savings Breakdown Card
     savings_breakdown_list = [(cat, savings) for cat, savings in potential_savings.items() if savings > 0]
     savings_breakdown_df = pd.DataFrame(savings_breakdown_list, columns=['Category', 'Potential Savings'])
+    
+    # Replace technical categories with user-friendly names
+    category_display_names = {
+        'unattached_disks': 'Unattached Disks',
+        'stopped_vms': 'Stopped VMs (Not Deallocated)',
+        'unused_public_ips': 'Unused Public IP Addresses', 
+        'empty_rgs': 'Empty Resource Groups',
+        'empty_asps': 'Empty App Service Plans',
+        'old_snapshots': 'Old Snapshots',
+        'low_cpu_vms': 'Low CPU Virtual Machines',
+        'low_cpu_asps': 'Low CPU App Service Plans',
+        'low_dtu_dbs': 'Low DTU SQL Databases',
+        'low_cpu_vcore_dbs': 'Low CPU vCore SQL Databases',
+        'idle_gateways': 'Idle Application Gateways',
+        'low_cpu_apps': 'Low CPU Web Apps',
+        'orphaned_nsgs': 'Orphaned Network Security Groups',
+        'orphaned_rts': 'Orphaned Route Tables'
+    }
+    
     if not savings_breakdown_df.empty:
-         savings_breakdown_df['Potential Savings'] = savings_breakdown_df['Potential Savings'].apply(lambda x: f"{currency} {x:.2f}")
+        # Replace technical category names with user-friendly names
+        savings_breakdown_df['Category'] = savings_breakdown_df['Category'].apply(
+            lambda x: category_display_names.get(x, x.replace('_', ' ').title())
+        )
+        savings_breakdown_df['Potential Savings'] = savings_breakdown_df['Potential Savings'].apply(lambda x: f"{currency} {x:.2f}")
+    
     html += df_to_html_card(savings_breakdown_df, "Potential Savings Breakdown (Monthly Estimate)", "savings-breakdown", "bi-graph-up-arrow", "Estimated monthly cost savings by resource category.")
 
     # Add Cost Breakdown Card (Optional - can be large)
