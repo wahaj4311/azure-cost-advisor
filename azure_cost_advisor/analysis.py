@@ -300,7 +300,7 @@ def find_stopped_vms(credential, subscription_id, console: Console):
                  # Use rg_name if available, otherwise vm.id
                  vm_identifier = f"VM {vm.name} in RG {rg_name}" if rg_name else f"VM ID {vm.id}"
                  logging.warning(f"Could not get instance view for {vm_identifier}. Error: {iv_error}", exc_info=True)
-                 console.print(f"  [yellow]Warning:[/][dim] Could not get instance view for VM {vm.name}. Skipping status check.[/]")
+                 console.print(f"  [yellow]Warning:[/yellow] Could not get instance view for VM {vm.name}. Skipping status check.[/]")
 
         if not stopped_vms:
             console.print("  :heavy_check_mark: No stopped (but not deallocated) VMs found.")
@@ -560,8 +560,8 @@ def find_underutilized_vms(credential, subscription_id, cpu_threshold_percent, l
                 try:
                     metrics_data = monitor_client.metrics.list(
                         resource_uri=vm.id,
-                        timespan=timespan, # Use correct timespan format
-                        interval="PT1H", # Example: Hourly average
+                        timespan=f"{(datetime.now() - timedelta(days=lookback_days)).isoformat()}/{datetime.now().isoformat()}",
+                        interval='P1D',
                         metricnames=metric_name,
                         aggregation="Average"
                     )
@@ -668,8 +668,8 @@ def find_low_usage_app_service_plans(credential, subscription_id, cpu_threshold_
                 try:
                     metrics_data = monitor_client.metrics.list(
                         resource_uri=plan_resource_uri,
-                        timespan=timespan, # Use correct timespan format
-                        interval="PT1H",
+                        timespan=f"{(datetime.now() - timedelta(days=lookback_days)).isoformat()}/{datetime.now().isoformat()}",
+                        interval='P1D',
                         metricnames=metric_name,
                         aggregation="Average"
                     )
@@ -811,8 +811,8 @@ def find_low_dtu_sql_databases(credential, subscription_id, dtu_threshold_percen
                  try:
                      metrics_data = monitor_client.metrics.list(
                          resource_uri=db_resource_uri,
-                         timespan=timespan, # Use correct timespan format
-                         interval="PT1H",
+                         timespan=f"{(datetime.now() - timedelta(days=lookback_days)).isoformat()}/{datetime.now().isoformat()}",
+                         interval='P1D',
                          metricnames=metric_name,
                          aggregation="Average"
                      )
@@ -868,152 +868,90 @@ def find_low_dtu_sql_databases(credential, subscription_id, dtu_threshold_percen
         console.print(f"[bold red]Error checking for low DTU SQL Databases:[/] {e}")
     return low_dtu_dbs
 
-def find_low_cpu_sql_vcore_databases(credential, subscription_id, cpu_threshold_percent, lookback_days, console: Console):
-    """Finds SQL Databases (vCore-based model) with low average CPU utilization."""
+def find_low_cpu_sql_vcore_databases(credential, subscription_id, cpu_threshold_percent=SQL_VCORE_LOW_CPU_THRESHOLD_PERCENT, lookback_days=METRIC_LOOKBACK_DAYS, console=None):
+    """Find SQL Databases using the vCore-based model that have low average CPU utilization over the specified lookback period."""
     logger = logging.getLogger()
-    logger.info(f"📉 Checking SQL Databases (vCore model) for avg CPU < {cpu_threshold_percent}% over the last {lookback_days} days...")
-    console.print(f"\n📉 Checking SQL Databases (vCore model) for avg CPU < {cpu_threshold_percent}% over the last {lookback_days} days...")
-    low_cpu_dbs = []
-    monitor_client = None # Initialize outside try block
+    logger.info("Starting analysis of SQL vCore databases for low CPU usage...")
+    if console:
+        console.print("[cyan]Analyzing SQL vCore databases for low CPU usage...[/]")
+
     try:
+        # Initialize clients
         sql_client = SqlManagementClient(credential, subscription_id)
         monitor_client = MonitorManagementClient(credential, subscription_id)
 
-        # Get the correct timespan format
-        timespan = _get_iso8601_timespan(lookback_days)
-        logger.debug(f"Using timespan for SQL vCore metrics: {timespan}")
-
+        # Get all SQL servers
         servers = list(sql_client.servers.list())
-        dbs_to_check = []
-
-        # Iterate through servers to find databases
-        for server in servers:
-            try:
-                rg_name = server.id.split('/')[4]
-            except IndexError:
-                logger.warning(f"Could not parse resource group for SQL server {server.name}. Skipping databases on this server.")
-                continue
-
-            databases = list(sql_client.databases.list_by_server(resource_group_name=rg_name, server_name=server.name))
-            for db in databases:
-                 # Check if it's a vCore-based database
-                 is_vcore_model = False
-                 # vCore tiers often include 'GeneralPurpose', 'BusinessCritical', 'Hyperscale'
-                 # Or check if family indicates vCore (e.g., 'Gen5', 'M')
-                 if db.current_sku and db.current_sku.tier and db.current_sku.tier.lower() in ['generalpurpose', 'businesscritical', 'hyperscale']:
-                     is_vcore_model = True
-                 elif db.current_sku and db.current_sku.family and db.current_sku.family.lower() not in ['s', 'p', 'b']: # Exclude DTU families
-                      # Assume non-DTU family might be vCore (needs careful check)
-                      is_vcore_model = True # This might need refinement based on actual SKU families observed
-                 elif hasattr(db, 'requested_sku') and db.requested_sku and db.requested_sku.tier and db.requested_sku.tier.lower() in ['generalpurpose', 'businesscritical', 'hyperscale']:
-                      is_vcore_model = True
-
-                 # Skip elastic pools
-                 if db.elastic_pool_id:
-                     logger.debug(f"Skipping database {db.name} as it's in an elastic pool.")
-                     continue
-
-                 if is_vcore_model:
-                     db_location = db.location if db.location else server.location
-                     dbs_to_check.append((db, rg_name, server.name, db_location))
-
-        if not dbs_to_check:
-            console.print("  ℹ No SQL Databases (vCore model) found to check metrics for.")
+        if not servers:
+            logger.info("No SQL servers found in the subscription.")
             return []
 
-        console.print(f"  - Found {len(dbs_to_check)} SQL Databases (vCore model) to analyze...")
-
-        for db, rg_name, server_name, location in dbs_to_check:
-            db_resource_uri = db.id # For error reporting
-            db_name = db.name # For error reporting
-            db_details = None # Initialize
+        low_cpu_dbs = []
+        for server in servers:
             try:
-                db_details = {
-                    "name": db.name,
-                    "id": db.id,
-                    "resource_group": rg_name,
-                    "server_name": server_name,
-                    "location": location,
-                    "tier": db.current_sku.tier if db.current_sku else 'Unknown',
-                    "sku": db.current_sku.name if db.current_sku else 'Unknown',
-                    "family": db.current_sku.family if db.current_sku else None, # e.g., Gen5
-                    "capacity": db.current_sku.capacity if db.current_sku else None, # e.g., vCores
-                    "avg_cpu_percent": None
-                }
-                avg_cpu = None
-                # Metric name for vCore CPU percentage
-                metric_name = "cpu_percent"
+                # Extract the resource group from the server ID
+                # Format: /subscriptions/{sub}/resourceGroups/{rg}/providers/...
+                resource_group_name = server.id.split('/')[4] if server.id and len(server.id.split('/')) > 4 else None
+                
+                if not resource_group_name:
+                    logger.warning(f"Could not extract resource group name from server ID: {server.id}")
+                    continue
+                    
+                # Get all databases for this server
+                databases = list(sql_client.databases.list_by_server(resource_group_name, server.name))
+                for db in databases:
+                    try:
+                        # Check if it's a vCore-based model
+                        if not hasattr(db, 'sku') or not db.sku or not hasattr(db.sku, 'name') or not db.sku.name:
+                            continue
+                            
+                        sku_name = db.sku.name.lower()
+                        if not any(prefix in sku_name for prefix in ['bc_', 'gp_', 'hs_']):
+                            continue
 
-                try:
-                    metrics_data = monitor_client.metrics.list(
-                        resource_uri=db_resource_uri,
-                        timespan=timespan, # Use correct timespan format
-                        interval="PT1H",
-                        metricnames=metric_name,
-                        aggregation="Average"
-                    )
+                        # Get CPU metrics
+                        metrics_data = monitor_client.metrics.list(
+                            resource_uri=db.id,
+                            timespan=f"{(datetime.now() - timedelta(days=lookback_days)).isoformat()}/{datetime.now().isoformat()}",
+                            interval='P1D',
+                            metricnames='cpu_percent',
+                            aggregation='Average'
+                        )
 
-                    if metrics_data and metrics_data.value:
-                         valid_points = [d.average for d in metrics_data.value[0].timeseries[0].data if d.average is not None]
-                         if valid_points:
-                             avg_cpu = sum(valid_points) / len(valid_points)
-                             db_details["avg_cpu_percent"] = avg_cpu
-                             logger.debug(f"SQL DB (vCore) {db_name} on {server_name} avg CPU: {avg_cpu:.2f}%")
-                         else:
-                              logger.warning(f"No valid data points found for metric '{metric_name}' for SQL DB (vCore) {db_name} on {server_name} in the timespan.")
-                    else:
-                         logger.warning(f"No metric data returned for '{metric_name}' for SQL DB (vCore) {db_name} on {server_name}.")
+                        if not metrics_data.value:
+                            logger.warning(f"No CPU metrics found for database {db.name} in server {server.name}")
+                            continue
 
-                except HttpResponseError as metric_error:
-                     # Check for specific "Metric configuration not found" error
-                     is_metric_not_found_error = (
-                         metric_error.status_code == 400 and
-                         metric_error.error and
-                         hasattr(metric_error.error, 'message') and
-                         metric_error.error.message and
-                         "failed to find metric configuration" in metric_error.error.message.lower()
-                     )
+                        avg_cpu = metrics_data.value[0].timeseries[0].data[-1].average if metrics_data.value[0].timeseries[0].data else None
+                        if avg_cpu is None:
+                            logger.warning(f"Could not calculate average CPU for database {db.name} in server {server.name}")
+                            continue
 
-                     if is_metric_not_found_error:
-                         # Log a concise warning and continue gracefully
-                         logger.warning(f"Metric '{metric_name}' not found for SQL DB (vCore) {db_name} on {server_name}. It might need to be enabled in Diagnostics settings.")
-                         console.print(f"  - [yellow]Warning:[/yellow] Metric '{metric_name}' not found for SQL DB (vCore) {db_name} on {server_name}. (Enable in Diagnostics?)")
-                     elif metric_error.status_code == 429: # Too Many Requests
-                         logger.warning(f"Metrics query for SQL DB (vCore) {db_name} on {server_name} throttled. Skipping.")
-                         console.print(f"  - [yellow]Throttled:[/yellow] Skipping metrics for SQL DB {db_name} on {server_name}.")
-                     else:
-                         # Log other HTTP errors with traceback for debugging
-                         logger.warning(f"Could not get metrics for SQL DB (vCore) {db_name} on {server_name}. Error: {metric_error}", exc_info=True)
-                         console.print(f"  - [yellow]Warning:[/yellow] Could not get metrics for vCore SQL DB {db_name} on {server_name} (Error: {metric_error.status_code}). Check logs.")
-                except Exception as metric_error:
-                    # Log other unexpected errors during metric processing
-                    logger.warning(f"Error processing metrics for SQL DB (vCore) {db_name} on {server_name}: {metric_error}", exc_info=True)
-                    console.print(f"  - [yellow]Warning:[/yellow] Error processing metrics for vCore SQL DB {db_name} on {server_name}. Check logs.")
+                        if avg_cpu < cpu_threshold_percent:
+                            low_cpu_dbs.append({
+                                'id': db.id,
+                                'name': db.name,
+                                'resource_group': resource_group_name,
+                                'location': server.location,
+                                'sku': db.sku.name,
+                                'tier': db.sku.tier if hasattr(db.sku, 'tier') else 'Unknown',
+                                'avg_cpu_percent': avg_cpu
+                            })
+                            logger.info(f"Found low CPU vCore database: {db.name} (Avg CPU: {avg_cpu:.1f}%)")
 
+                    except Exception as db_error:
+                        logger.error(f"Error processing database {db.name} in server {server.name}: {db_error}")
+                        continue
 
-                if avg_cpu is not None:
-                    if avg_cpu < cpu_threshold_percent:
-                        console.print(f"  - [bold yellow]Low Usage:[/bold yellow] SQL DB {db_name} on {server_name} (Avg CPU: {avg_cpu:.1f}%) is below threshold ({cpu_threshold_percent}%).")
-                        low_cpu_dbs.append(db_details)
-                    else:
-                         logger.info(f"SQL DB (vCore) {db_name} on {server_name} CPU usage OK (Avg: {avg_cpu:.1f}%)")
-                else:
-                    console.print(f"  - [dim]No CPU data for vCore SQL DB:[/dim] {db_name} on {server_name}")
+            except Exception as server_error:
+                logger.error(f"Error processing server {server.name}: {server_error}")
+                continue
 
-            except Exception as e: # Catch errors in the outer loop for a specific DB
-                logger.error(f"Error processing SQL DB (vCore) {db_name} on {server_name}: {e}", exc_info=True)
-                console.print(f"  [red]Error:[/red] Could not process SQL DB {db_name} on {server_name}. Check logs.")
-
-        console.print("\n--- SQL vCore Database Usage Analysis Summary ---")
-        if low_cpu_dbs:
-            console.print(f"  :warning: Found {len(low_cpu_dbs)} SQL DB(s) (vCore model) with avg CPU < {cpu_threshold_percent}%.")
-        else:
-            console.print(f"  :heavy_check_mark: No SQL DBs (vCore model) found with avg CPU < {cpu_threshold_percent}%.")
+        return low_cpu_dbs
 
     except Exception as e:
-        logger.error(f"Error checking for low CPU vCore SQL databases: {e}", exc_info=True)
-        console.print(f"[bold red]Error checking for low CPU vCore SQL Databases:[/] {e}")
-    return low_cpu_dbs
+        logger.error(f"Error in find_low_cpu_sql_vcore_databases: {e}")
+        return []
 
 def find_idle_application_gateways(credential, subscription_id, lookback_days, idle_connection_threshold, console: Console):
     """Finds Application Gateways with average current connections below a threshold."""

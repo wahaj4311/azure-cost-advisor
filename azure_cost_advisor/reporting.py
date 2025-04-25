@@ -226,7 +226,7 @@ def generate_html_report_content(
     savings_breakdown_df = pd.DataFrame(savings_breakdown_list, columns=['Category', 'Potential Savings'])
     if not savings_breakdown_df.empty:
          savings_breakdown_df['Potential Savings'] = savings_breakdown_df['Potential Savings'].apply(lambda x: f"{currency} {x:.2f}")
-    html += df_to_html_card(savings_breakdown_df, "Potential Savings Breakdown (Monthly Estimate)", "savings-breakdown", "bi-graph-up-arrow")
+    html += df_to_html_card(savings_breakdown_df, "Potential Savings Breakdown (Monthly Estimate)", "savings-breakdown", "bi-graph-up-arrow", "Estimated monthly cost savings by resource category.")
 
     # Add Cost Breakdown Card (Optional - can be large)
     # cost_breakdown_df = pd.DataFrame(list(cost_breakdown.items()), columns=['Resource Type', 'Estimated Cost']) if cost_breakdown else pd.DataFrame()

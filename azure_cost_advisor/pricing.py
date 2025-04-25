@@ -477,46 +477,44 @@ def estimate_disk_cost(sku_name: str, size_gb: int, location: str, console: Cons
     filter_string = " and ".join(filter_parts)
     items = fetch_retail_prices(filter_string, logger=logger)
 
-    if not items:
+    if items:
+        best_match = find_best_match(
+            items,
+            normalized_location,
+            resource_desc=f"{sku_name} ({disk_tier}) Disk",
+            required_unit = '1 GB/Month' if is_hdd else '1/Month', # Match "1/Month" or "1 GB/Month"
+            meter_name_pattern=meter_name_pattern,
+            product_name_pattern=product_name_pattern,
+            strict_unit_match=True # Units should be exact for disks
+        )
+
+        if best_match:
+            # --- Calculate Cost ---
+            monthly_cost, unit_str = estimate_monthly_cost(best_match, logger)
+
+            if monthly_cost is None:
+                logger.error(f"Failed to estimate monthly cost from matched price for disk {sku_name}.")
+                return 0.0
+
+            # Adjust HDD cost based on actual size
+            if is_hdd:
+                if unit_str and 'gb' in unit_str.lower():
+                    final_cost = monthly_cost * size_gb
+                    logger.info(f"Estimated Standard HDD cost for {size_gb}GB: {monthly_cost:.6f} {unit_str} * {size_gb} GB = {final_cost:.2f} {best_match.get('currencyCode', 'USD')}/Month")
+                    return final_cost
+                else:
+                     logger.error(f"Standard HDD price found, but unit '{unit_str}' was not per GB. Cannot calculate final cost for {sku_name}.")
+                     return 0.0 # Cannot calculate accurately
+            else:
+                # Premium/Standard SSD cost is per disk tier
+                logger.info(f"Estimated Disk cost for {sku_name} ({disk_tier}) in {normalized_location}: {monthly_cost:.2f} {unit_str}")
+                return monthly_cost
+        else:
+            logger.warning(f"Could not find best price match for disk: {sku_name} ({disk_tier}) in {normalized_location}.")
+            return 0.0
+    else:
         logger.warning(f"No price items found for disk: {sku_name} ({disk_tier}) in {normalized_location}. Filter: {filter_string}")
         return 0.0
-
-    # --- Find Best Match ---
-    # HDD needs specific unit handling
-    best_match = find_best_match(
-        items,
-        normalized_location,
-        resource_desc=f"{sku_name} ({disk_tier}) Disk",
-        required_unit = '1 GB/Month' if is_hdd else '1/Month', # Match "1/Month" or "1 GB/Month"
-        meter_name_pattern=meter_name_pattern,
-        product_name_pattern=product_name_pattern,
-        strict_unit_match=True # Units should be exact for disks
-    )
-
-    if not best_match:
-        logger.warning(f"Could not find best price match for disk: {sku_name} ({disk_tier}) in {normalized_location}.")
-        return 0.0
-
-    # --- Calculate Cost ---
-    monthly_cost, unit_str = estimate_monthly_cost(best_match, logger)
-
-    if monthly_cost is None:
-        logger.error(f"Failed to estimate monthly cost from matched price for disk {sku_name}.")
-        return 0.0
-
-    # Adjust HDD cost based on actual size
-    if is_hdd:
-        if unit_str and 'gb' in unit_str.lower():
-            final_cost = monthly_cost * size_gb
-            logger.info(f"Estimated Standard HDD cost for {size_gb}GB: {monthly_cost:.6f} {unit_str} * {size_gb} GB = {final_cost:.2f} {best_match.get('currencyCode', 'USD')}/Month")
-            return final_cost
-        else:
-             logger.error(f"Standard HDD price found, but unit '{unit_str}' was not per GB. Cannot calculate final cost for {sku_name}.")
-             return 0.0 # Cannot calculate accurately
-    else:
-        # Premium/Standard SSD cost is per disk tier
-        logger.info(f"Estimated Disk cost for {sku_name} ({disk_tier}) in {normalized_location}: {monthly_cost:.2f} {unit_str}")
-        return monthly_cost
 
 
 def estimate_public_ip_cost(sku_name: str, location: str, console: Console = _console, logger: Optional['Logger'] = None) -> float:
@@ -574,8 +572,8 @@ def estimate_public_ip_cost(sku_name: str, location: str, console: Console = _co
     # Fetch and match prices
     items = fetch_retail_prices(filter_string, logger=logger)
     if items:
-    best_match = find_best_match(
-        items,
+        best_match = find_best_match(
+            items,
             normalized_location,
             resource_desc,
             required_unit="Hour", # Expect hourly price
@@ -596,7 +594,7 @@ def estimate_public_ip_cost(sku_name: str, location: str, console: Console = _co
     else:
         logger.warning(f"No price items returned for Public IP filter: {filter_string}")
 
-         return 0.0
+    return 0.0 # Ensure this line has zero leading spaces
 
 def estimate_snapshot_cost(size_gb: int, location: str, sku_name: Optional[str], console: Console = _console, logger: Optional['Logger'] = None) -> float:
     """Estimates the monthly cost of a Managed Disk Snapshot using the Retail Prices API."""
@@ -614,10 +612,10 @@ def estimate_snapshot_cost(size_gb: int, location: str, sku_name: Optional[str],
     storage_type = "Standard HDD" # Default
     sku_filter_part = "contains(meterName, 'Standard Snapshot')" # Default filter
     if 'premium' in sku_lower:
-            storage_type = "Premium SSD"
+        storage_type = "Premium SSD"
         sku_filter_part = "contains(meterName, 'Premium Snapshot')"
     elif 'standardssd' in sku_lower:
-            storage_type = "Standard SSD"
+        storage_type = "Standard SSD"
         sku_filter_part = "contains(meterName, 'Standard SSD Snapshot')"
     elif 'standard' in sku_lower: # Handles Standard_LRS and Standard_ZRS (ZRS more expensive)
         storage_type = "Standard HDD"
@@ -650,12 +648,11 @@ def estimate_snapshot_cost(size_gb: int, location: str, sku_name: Optional[str],
     # Fetch and match prices
     items = fetch_retail_prices(filter_string, logger=logger)
     if items:
-        # Find the best match (usually only one price per GB/Month for snapshots)
-    best_match = find_best_match(
-        items,
+        best_match = find_best_match(
+            items,
             normalized_location,
             resource_desc,
-        required_unit=required_unit,
+            required_unit=required_unit,
             strict_unit_match=False # Allow '1 GB/Month' etc.
         )
 
@@ -672,7 +669,7 @@ def estimate_snapshot_cost(size_gb: int, location: str, sku_name: Optional[str],
     else:
         logger.warning(f"No price items returned for Snapshot filter: {filter_string}")
 
-         return 0.0
+    return 0.0
 
 def estimate_app_service_plan_cost(tier: str, size: str, location: str, console: Console = _console, logger: Optional['Logger'] = None) -> float:
     """Estimates monthly cost for an App Service Plan."""
@@ -738,6 +735,21 @@ def estimate_app_service_plan_cost(tier: str, size: str, location: str, console:
         response = fetch_retail_prices(filter_string, logger=logger)
         all_items = response.get('Items', [])
     
+    # If still no items, try a fallback region (East US is generally well-supported)
+    if not all_items:
+        fallback_location = 'East US'
+        logger.warning(f"No App Service price data for {location}. Trying fallback location: {fallback_location}")
+        
+        # Try both service names with fallback location
+        filter_string = f"serviceName eq 'App Service' and location eq '{fallback_location}'"
+        response = fetch_retail_prices(filter_string, logger=logger)
+        all_items = response.get('Items', [])
+        
+        if not all_items:
+            filter_string = f"serviceName eq 'Azure App Service' and location eq '{fallback_location}'"
+            response = fetch_retail_prices(filter_string, logger=logger)
+            all_items = response.get('Items', [])
+    
     if all_items:
         logger.debug(f"Found {len(all_items)} App Service price items, searching for tier {tier_name} and size {size_name}")
         
@@ -767,7 +779,7 @@ def estimate_app_service_plan_cost(tier: str, size: str, location: str, console:
         # If no match found with specific product names, try a broader search
         if not best_match:
             logger.debug("Trying broad match with just SKU pattern")
-        best_match = find_best_match(
+            best_match = find_best_match(
                 all_items,
                 location,
                 f"App Service Plan {tier} {size}",
@@ -778,8 +790,44 @@ def estimate_app_service_plan_cost(tier: str, size: str, location: str, console:
         if best_match:
             return best_match.get('retailPrice', 0.0)
     
+    # If we get here, we couldn't find a price match
     logger.warning(f"Could not find a price match for App Service Plan {tier} {size} in {location}")
-        return 0.0
+    
+    # Use default pricing as fallback based on tier and size
+    default_price = 0.0
+    tier_lower = tier.lower()
+    
+    # These are conservative estimates based on general Azure pricing (monthly)
+    if tier_lower == 'free':
+        default_price = 0.0  # Free tier is free
+    elif tier_lower == 'shared':
+        default_price = 13.14  # D1 shared around $13/month
+    elif tier_lower == 'basic':
+        if size.lower() == 'b1':
+            default_price = 55.80  # B1 around $55/month
+        elif size.lower() == 'b2':
+            default_price = 111.60  # B2 around $110/month
+        elif size.lower() == 'b3':
+            default_price = 223.20  # B3 around $220/month
+    elif tier_lower == 'standard':
+        if size.lower() == 's1':
+            default_price = 74.40  # S1 around $75/month
+        elif size.lower() == 's2':
+            default_price = 148.80  # S2 around $150/month
+        elif size.lower() == 's3':
+            default_price = 297.60  # S3 around $300/month
+    elif tier_lower == 'premium':
+        # Premium is more expensive
+        default_price = 146.00  # P1v2 around $146/month as a base estimate
+        if 'v2' in size.lower() or 'v3' in size.lower():
+            # Scale based on size number if available
+            size_match = re.search(r'p(\d+)', size.lower())
+            if size_match:
+                size_num = int(size_match.group(1))
+                default_price = 146.00 * size_num  # Scale based on size number
+
+    logger.info(f"Using fallback price estimate for {tier} {size}: ${default_price:.2f}/month")
+    return default_price
 
 def estimate_sql_database_cost(sku_tier: Optional[str], sku_name: Optional[str], family: Optional[str], capacity: Optional[int], location: str, console: Console = _console, logger: Optional['Logger'] = None) -> float:
     """Estimates the monthly cost of an Azure SQL Database (DTU or vCore) using the Retail Prices API."""
@@ -790,7 +838,7 @@ def estimate_sql_database_cost(sku_tier: Optional[str], sku_name: Optional[str],
     normalized_location = _normalize_location(location, logger)
     if not normalized_location:
         logger.error(f"Could not normalize location '{location}' for SQL DB cost estimation.")
-            return 0.0
+        return 0.0
 
     # Normalize inputs
     tier_lower = sku_tier.lower() if sku_tier else ""
@@ -829,11 +877,11 @@ def estimate_sql_database_cost(sku_tier: Optional[str], sku_name: Optional[str],
         logger.debug(f"SQL DTU filter '{filter_string}' returned {item_count} items.")
 
         if items:
-    best_match = find_best_match(
-        items,
+            best_match = find_best_match(
+                items,
                 normalized_location,
                 resource_desc,
-        required_unit=required_unit,
+                required_unit=required_unit,
                 strict_unit_match=False,
                 meter_name_pattern=f"{sku_tier}|{sku_name}|DTU",
                 product_name_pattern=sku_tier, # Match tier in product name
@@ -918,7 +966,7 @@ def estimate_sql_database_cost(sku_tier: Optional[str], sku_name: Optional[str],
         # ... (find best match for storage, estimate cost per GB, multiply by assumed/actual size) ...
         # total_monthly_cost += storage_cost_per_gb_month * storage_size_gb
 
-            else:
+    else:
         logger.warning(f"Could not determine model (DTU/vCore) for SQL DB: Tier='{sku_tier}', SKU='{sku_name}', Family='{family}'. Cannot estimate cost.")
         return 0.0
 
@@ -989,7 +1037,6 @@ def estimate_vm_cost(vm_size: str, location: str, os_type: str = 'Linux', consol
         if os_type.lower() != 'linux':
             filter_string += f" and contains(productName, '{os_type}')"
         
-        # This assumes Windows is the default in the API, which is usually not the case, but provides a fallback
         response = fetch_retail_prices(filter_string, logger=logger)
         items = response.get('Items', [])
         
@@ -1005,10 +1052,32 @@ def estimate_vm_cost(vm_size: str, location: str, os_type: str = 'Linux', consol
         response = fetch_retail_prices(filter_string, logger=logger)
         all_items = response.get('Items', [])
         logger.debug(f"Falling back to generic VM filter, found {len(all_items)} items")
+        
+        # If still no items and location is West US 3, try East US as a fallback
+        if not all_items and 'west us 3' in location.lower():
+            fallback_location = 'East US'
+            logger.warning(f"No pricing data for {location}. Trying fallback location: {fallback_location}")
+            fallback_filter = f"serviceName eq 'Virtual Machines' and location eq '{fallback_location}'"
+            fallback_response = fetch_retail_prices(fallback_filter, logger=logger)
+            all_items = fallback_response.get('Items', [])
+            logger.debug(f"Using fallback location {fallback_location}, found {len(all_items)} items")
     
     # Extract VM-specific SKU pattern from size
     sku_pattern = vm_size.replace('Standard_', '').lower()
     logger.debug(f"VM SKU pattern for matching: {sku_pattern}")
+    
+    # Safety check - don't call find_best_match with empty items
+    if not all_items:
+        logger.warning(f"No pricing data available for VM {vm_size} ({os_type}) in {location}. Using default estimate.")
+        # Return a reasonable default based on size
+        cpu_count = int(size_num) if size_num.isdigit() else 2
+        # Very rough estimate based on size
+        if 'standard_b' in vm_size.lower():  # Burstable
+            return 0.05 * cpu_count  # $0.05 per vCPU for B-series (rough estimate)
+        elif 'standard_d' in vm_size.lower():  # General purpose
+            return 0.10 * cpu_count  # $0.10 per vCPU for D-series (rough estimate)
+        else:
+            return 0.15 * cpu_count  # Default rough estimate
     
     # Find best match
     best_match = find_best_match(
@@ -1025,7 +1094,9 @@ def estimate_vm_cost(vm_size: str, location: str, os_type: str = 'Linux', consol
         return best_match.get('retailPrice', 0.0)
     
     logger.warning(f"Could not find a price match for VM {vm_size} ({os_type}) in {location}")
-         return 0.0
+    # Return a reasonable default based on size
+    cpu_count = int(size_num) if size_num.isdigit() else 2
+    return 0.10 * cpu_count  # $0.10 per vCPU (rough estimate)
 
 def estimate_app_gateway_cost(sku_tier: str, sku_name: str, location: str, console: Console = _console, logger: Optional['Logger'] = None) -> float:
     """Estimates the monthly cost of an Azure Application Gateway instance using the Retail Prices API."""

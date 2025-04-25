@@ -151,11 +151,26 @@ def main():
         all_findings_raw['low_dtu_dbs'] = analysis.find_low_dtu_sql_databases(credential, subscription_id, dtu_threshold_percent=config.SQL_DB_LOW_DTU_THRESHOLD_PERCENT, lookback_days=config.METRIC_LOOKBACK_DAYS, console=console)
         all_findings_raw['low_cpu_vcore_dbs'] = analysis.find_low_cpu_sql_vcore_databases(credential, subscription_id, cpu_threshold_percent=config.SQL_VCORE_LOW_CPU_THRESHOLD_PERCENT, lookback_days=config.METRIC_LOOKBACK_DAYS, console=console)
         
-        # Ensure low_cpu_vcore_dbs is always a list
+        # Ensure low_cpu_vcore_dbs is always a list of dictionaries
         if all_findings_raw['low_cpu_vcore_dbs'] is None:
             all_findings_raw['low_cpu_vcore_dbs'] = []
+        elif isinstance(all_findings_raw['low_cpu_vcore_dbs'], list):
+            # Check each item in the list to ensure they're dictionaries
+            clean_results = []
+            for item in all_findings_raw['low_cpu_vcore_dbs']:
+                if isinstance(item, dict):
+                    clean_results.append(item)
+                elif isinstance(item, str):
+                    # If it's a string, log it and skip
+                    logger.error(f"Unexpected string in low_cpu_vcore_dbs results: {item}")
+                else:
+                    logger.error(f"Unexpected type in low_cpu_vcore_dbs results: {type(item)}")
+            all_findings_raw['low_cpu_vcore_dbs'] = clean_results
         elif isinstance(all_findings_raw['low_cpu_vcore_dbs'], str):
             logger.error(f"low_cpu_vcore_dbs returned a string instead of a list: {all_findings_raw['low_cpu_vcore_dbs']}")
+            all_findings_raw['low_cpu_vcore_dbs'] = []
+        elif not isinstance(all_findings_raw['low_cpu_vcore_dbs'], list):
+            logger.error(f"low_cpu_vcore_dbs returned unexpected type {type(all_findings_raw['low_cpu_vcore_dbs'])}: {all_findings_raw['low_cpu_vcore_dbs']}")
             all_findings_raw['low_cpu_vcore_dbs'] = []
             
         all_findings_raw['idle_gateways'] = analysis.find_idle_application_gateways(credential, subscription_id, lookback_days=config.METRIC_LOOKBACK_DAYS, idle_connection_threshold=config.IDLE_CONNECTION_THRESHOLD_GATEWAY, console=console)
