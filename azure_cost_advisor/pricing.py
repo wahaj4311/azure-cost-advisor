@@ -13,7 +13,7 @@ import urllib.parse
 # Import constants from config module
 # Assuming config.py is in the same directory or PYTHONPATH is set correctly
 from .config import (
-    RETAIL_PRICES_API_ENDPOINT, 
+    RETAIL_PRICES_API_ENDPOINT,
     HOURS_PER_MONTH,
     # DISK_SIZE_TO_TIER <<< Removed from import
 )
@@ -43,7 +43,7 @@ DISK_SIZE_TO_TIER = {
 }
 
 # Initialize console for standalone use (e.g., testing) or if passed
-_console = Console() 
+_console = Console()
 
 # --- Location Normalization Helper ---
 # Simple cache for normalized locations
@@ -55,7 +55,7 @@ def _normalize_location(location: str, logger: Optional['Logger'] = None) -> str
     global _location_normalization_cache
     if not location:
         return ''
-    
+
     # Check cache first
     if location in _location_normalization_cache:
         return _location_normalization_cache[location]
@@ -105,7 +105,7 @@ def _normalize_location(location: str, logger: Optional['Logger'] = None) -> str
     _location_normalization_cache[location] = normalized_location
     return normalized_location
 
-# --- Pricing Cache --- 
+# --- Pricing Cache ---
 # Cache for API results { filter_string: list_of_price_items }
 price_cache: Dict[str, Optional[List[Dict[str, Any]]]] = {}
 
@@ -133,29 +133,29 @@ def fetch_retail_prices(filter_string: str, skip_token: str = None, api_version:
     if filter_string in _FAILED_FILTERS:
         logger.warning(f"Skipping known failed filter: {filter_string}")
         return {"Items": [], "Count": 0, "NextPageLink": None}
-    
+
     # Check cache first
     cache_key = f"{filter_string}|{skip_token}"
     if cache_key in _PRICE_CACHE:
         return _PRICE_CACHE[cache_key]
 
     # Properly escape the filter string for OData - properly encode spaces and special characters
-    encoded_filter = urllib.parse.quote(filter_string)
-    
+    # encoded_filter = urllib.parse.quote(filter_string) # requests handles encoding params
+
     # Build URL
     api_url = "https://prices.azure.com/api/retail/prices"
     params = {
         'api-version': api_version,
         '$filter': filter_string  # We pass the unencoded filter as a param so requests can encode it properly
     }
-    
+
     if skip_token:
         params['$skiptoken'] = skip_token
 
     try:
         logger.debug(f"Fetching prices with filter: {filter_string}")
         response = requests.get(api_url, params=params)
-        
+
         # Handle non-200 responses
         if response.status_code != 200:
             logger.warning(f"API request failed with status {response.status_code}: {response.text}")
@@ -164,7 +164,7 @@ def fetch_retail_prices(filter_string: str, skip_token: str = None, api_version:
                 _FAILED_FILTERS.add(filter_string)
                 logger.warning(f"Added to failed filters: {filter_string}")
             return {"Items": [], "Count": 0, "NextPageLink": None}
-        
+
         result = response.json()
         _PRICE_CACHE[cache_key] = result
         return result
@@ -172,14 +172,14 @@ def fetch_retail_prices(filter_string: str, skip_token: str = None, api_version:
         logger.exception(f"Error fetching prices: {e}")
         return {"Items": [], "Count": 0, "NextPageLink": None}
 
-# --- Pricing Helper Functions --- 
+# --- Pricing Helper Functions ---
 def find_best_match(
     items: List[Dict[str, Any]],
     location: str,
     resource_desc: str,
     required_price_type: str = "Consumption",
     required_unit: Optional[str] = None,
-    product_name_pattern: Optional[str] = None, 
+    product_name_pattern: Optional[str] = None,
     sku_name_pattern: Optional[str] = None,
     meter_name_pattern: Optional[str] = None,
     exact_sku_name: Optional[str] = None,
@@ -191,7 +191,7 @@ def find_best_match(
 ) -> Optional[Dict[str, Any]]:
     """
     Finds the best matching pricing item from a list based on various criteria.
-    
+
     Debug logging has been added to trace the filtering process and identify issues.
 
     Args:
@@ -218,10 +218,10 @@ def find_best_match(
         return None
 
     logger.debug(f"Finding best match for {resource_desc} in {location} from {len(items)} candidates")
-    logger.debug(f"Match criteria: price_type={required_price_type}, unit={required_unit}, " 
-                f"product_pattern={product_name_pattern}, sku_pattern={sku_name_pattern}, " 
+    logger.debug(f"Match criteria: price_type={required_price_type}, unit={required_unit}, "
+                f"product_pattern={product_name_pattern}, sku_pattern={sku_name_pattern}, "
                 f"meter_pattern={meter_name_pattern}")
-    
+
     # Initialize counters for debug logging
     passed_filters = 0
     rejected_price_type = 0
@@ -232,7 +232,7 @@ def find_best_match(
     rejected_negative_score = 0
 
     candidates = []
-    
+
     for item in items:
         # Skip items with wrong price type
         item_price_type = item.get('priceType', '')
@@ -240,7 +240,7 @@ def find_best_match(
             rejected_price_type += 1
             logger.debug(f"Skipping item with price type {item_price_type} != {required_price_type}: {item.get('skuName')}")
             continue
-            
+
         # Skip items with wrong unit if required
         item_unit = item.get('unitOfMeasure', '')
         if required_unit and item_unit and not _is_compatible_unit(item_unit, required_unit, strict_unit_match):
@@ -261,57 +261,57 @@ def find_best_match(
             rejected_sku_pattern += 1
             logger.debug(f"Skipping item with SKU name not matching pattern {sku_name_pattern}: {sku_name}")
             continue
-            
+
         # Apply meter name pattern filtering
         meter_name = item.get('meterName', '')
         if meter_name_pattern and not re.search(meter_name_pattern, meter_name, re.IGNORECASE):
             rejected_meter_pattern += 1
             logger.debug(f"Skipping item with meter name not matching pattern {meter_name_pattern}: {meter_name}")
             continue
-            
+
         # For items passing all filters, compute a relevance score
         score = 10.0  # Base score
-        
+
         # Boost score for exact SKU match (highest priority)
         if exact_sku_name and sku_name.lower() == exact_sku_name.lower():
             score += 100.0
             logger.debug(f"Exact SKU match +100 points: {sku_name}")
-        
+
         # Boost score for exact meter name match
         if exact_meter_name and meter_name.lower() == exact_meter_name.lower():
             score += 50.0
             logger.debug(f"Exact meter name match +50 points: {meter_name}")
-        
+
         # Boost score for preferred meter contents
         if prefer_contains_meter:
             for keyword in prefer_contains_meter:
                 if keyword and keyword.lower() in meter_name.lower():
                     score += 10.0
                     logger.debug(f"Preferred meter keyword match +10 points: {keyword}")
-                    
+
         # Reduce score for avoided meter contents
         if avoid_contains_meter:
             for keyword in avoid_contains_meter:
                 if keyword and keyword.lower() in meter_name.lower():
                     score -= 50.0
                     logger.debug(f"Avoided meter keyword match -50 points: {keyword}")
-        
+
         # Skip items with negative scores (strongly avoided)
         if score <= 0:
             rejected_negative_score += 1
             logger.debug(f"Skipping item with negative relevance score: {item.get('skuName')}")
             continue
-            
+
         # Add to candidates with computed score
         price = item.get('retailPrice', 0.0)
         candidates.append((item, score, price))
         passed_filters += 1
-    
+
     # Log filter results
     logger.debug(f"Filter results: {passed_filters} passed, {rejected_price_type} rejected (price type), "
-                f"{rejected_unit} rejected (unit), {rejected_product_pattern} rejected (product pattern), "
-                f"{rejected_sku_pattern} rejected (SKU pattern), {rejected_meter_pattern} rejected (meter pattern), "
-                f"{rejected_negative_score} rejected (negative score)")
+                 f"{rejected_unit} rejected (unit), {rejected_product_pattern} rejected (product pattern), "
+                 f"{rejected_sku_pattern} rejected (SKU pattern), {rejected_meter_pattern} rejected (meter pattern), "
+                 f"{rejected_negative_score} rejected (negative score)")
 
     if not candidates:
         logger.warning(f"No matching candidates found for {resource_desc} after filtering {len(items)} items")
@@ -322,44 +322,44 @@ def find_best_match(
             for i in range(sample_size):
                 item = items[i]
                 logger.debug(f"  Item {i+1}: SKU={item.get('skuName', 'N/A')}, "
-                           f"Product={item.get('productName', 'N/A')}, "
-                           f"Meter={item.get('meterName', 'N/A')}, "
-                           f"Unit={item.get('unitOfMeasure', 'N/A')}, "
-                           f"Price Type={item.get('priceType', 'N/A')}")
+                             f"Product={item.get('productName', 'N/A')}, "
+                             f"Meter={item.get('meterName', 'N/A')}, "
+                             f"Unit={item.get('unitOfMeasure', 'N/A')}, "
+                             f"Price Type={item.get('priceType', 'N/A')}")
         return None
 
     # Sort by score (descending) and price (ascending)
     candidates.sort(key=lambda x: (-x[1], x[2]))
-    
+
     # Get the top candidate
     best_match = candidates[0][0]
     best_score = candidates[0][1]
-    
+
     logger.debug(f"Best match for {resource_desc}: {best_match.get('skuName')} "
-               f"(score: {best_score:.1f}, price: {best_match.get('retailPrice', 0.0):.4f})")
-    
+                 f"(score: {best_score:.1f}, price: {best_match.get('retailPrice', 0.0):.4f})")
+
     # Log alternative candidates for reference
     if len(candidates) > 1:
         logger.debug(f"Alternative candidates (top 3 of {len(candidates)}):")
         for i in range(1, min(4, len(candidates))):
             alt_item, alt_score, alt_price = candidates[i]
             logger.debug(f"  Alternative {i}: {alt_item.get('skuName')} "
-                       f"(score: {alt_score:.1f}, price: {alt_price:.4f})")
-    
+                         f"(score: {alt_score:.1f}, price: {alt_price:.4f})")
+
     return best_match
 
 def estimate_monthly_cost(price_info: Optional[Dict[str, Any]], console: Console = _console, logger: Optional['Logger'] = None) -> Tuple[Optional[float], Optional[str]]:
     """Estimates monthly cost from a price info object."""
     if not logger: logger = logging.getLogger() # Fallback
     if not price_info or price_info.get('retailPrice') is None or price_info.get('retailPrice') <= 0:
-         logger.debug(f"Cannot estimate monthly cost, invalid price_info: {price_info}")
-         return None, None # Corrected indentation
+        logger.debug(f"Cannot estimate monthly cost, invalid price_info: {price_info}")
+        return None, None # Corrected indentation
 
     price = price_info['retailPrice']
     unit = price_info.get('unitOfMeasure', '').lower()
     currency = price_info.get('currencyCode', 'USD') # Default to USD if missing
     meter_name = price_info.get('meterName', 'Unknown Meter') # For logging
-    
+
     monthly_cost = None
     estimated_unit_str = f"{currency} / Month" # Assume monthly unless overridden
 
@@ -372,8 +372,8 @@ def estimate_monthly_cost(price_info: Optional[Dict[str, Any]], console: Console
             hours_per_unit = float(match.group(1))
 
         if hours_per_unit > 0:
-             monthly_cost = (price / hours_per_unit) * HOURS_PER_MONTH
-             logger.debug(f"Calculated hourly cost for '{meter_name}': {price}/{hours_per_unit} = {price/hours_per_unit:.6f} {currency}/Hour -> Monthly: {monthly_cost:.4f}")
+            monthly_cost = (price / hours_per_unit) * HOURS_PER_MONTH # Corrected indentation
+            logger.debug(f"Calculated hourly cost for '{meter_name}': {price}/{hours_per_unit} = {price/hours_per_unit:.6f} {currency}/Hour -> Monthly: {monthly_cost:.4f}")
         else:
             logger.warning(f"Could not parse hours_per_unit from unit '{unit}' for meter '{meter_name}'. Cannot estimate monthly cost accurately.")
             return price, f"{currency} / {unit}" # Return raw price and unit
@@ -386,19 +386,19 @@ def estimate_monthly_cost(price_info: Optional[Dict[str, Any]], console: Console
         monthly_cost = price # Treat as per GB/Month for estimation consistency
         estimated_unit_str = f"{currency} / GB / Month"
         logger.debug(f"Assuming cost is per GB/Month for unit '{unit}' for '{meter_name}': {price:.4f} {estimated_unit_str}")
-    elif 'month' in unit: 
+    elif 'month' in unit:
          # Check for patterns like "1 Month", "100 / Month"
          # If it's a fixed monthly price, just use it.
-         monthly_cost = price
-         logger.debug(f"Cost is fixed monthly for '{meter_name}': {price:.4f} {estimated_unit_str}")
+        monthly_cost = price # Corrected indentation
+        logger.debug(f"Cost is fixed monthly for '{meter_name}': {price:.4f} {estimated_unit_str}")
     # Add other unit conversions if needed (e.g., per 10k transactions)
     else:
-         logger.warning(f"Cannot estimate monthly cost for meter '{meter_name}' with unit '{unit}'. Reporting raw price: {price} {currency}")
-         return price, f"{currency} / {unit}" # Return raw price and unit
+        logger.warning(f"Cannot estimate monthly cost for meter '{meter_name}' with unit '{unit}'. Reporting raw price: {price} {currency}") # Corrected indentation
+        return price, f"{currency} / {unit}" # Return raw price and unit
 
     return monthly_cost, estimated_unit_str
 
-# --- Specific Cost Estimators --- 
+# --- Specific Cost Estimators ---
 def estimate_disk_cost(sku_name: str, size_gb: int, location: str, console: Console = _console, logger: Optional['Logger'] = None) -> float:
     """Estimates the monthly cost of an Azure Managed Disk using the Retail Prices API."""
     if not logger: logger = logging.getLogger() # Fallback
@@ -409,7 +409,7 @@ def estimate_disk_cost(sku_name: str, size_gb: int, location: str, console: Cons
     if not normalized_location:
         logger.error(f"Could not normalize location '{location}' for disk cost estimation.")
         return 0.0
-    
+
     logger.info(f"Estimating cost for Disk: sku={sku_name}, size={size_gb}GB, location={normalized_location} (Original: {location})")
     price = 0.0
 
@@ -432,7 +432,7 @@ def estimate_disk_cost(sku_name: str, size_gb: int, location: str, console: Cons
             disk_tier = tier_map[0] if is_premium else tier_map[1] # 0 for Premium, 1 for Standard SSD
             logger.debug(f"Mapped size {size_gb}GB to closest tier size {closest_size}GB -> Tier: {disk_tier}")
         else:
-             logger.warning(f"Could not map disk size {size_gb}GB to a standard tier for {sku_name}. Pricing might be inaccurate.")
+            logger.warning(f"Could not map disk size {size_gb}GB to a standard tier for {sku_name}. Pricing might be inaccurate.") # Corrected indentation
 
     # --- Build Filter ---
     filter_parts = [
@@ -444,6 +444,7 @@ def estimate_disk_cost(sku_name: str, size_gb: int, location: str, console: Cons
     meter_name_pattern = None
     product_name_pattern = None
     service_name = 'Managed Disks' # Default service name
+    required_unit = '1/Month' # Default unit for Premium/Standard SSD Tiers
 
     if is_premium and disk_tier:
         # Premium SSD (e.g., P10)
@@ -469,28 +470,30 @@ def estimate_disk_cost(sku_name: str, size_gb: int, location: str, console: Cons
         meter_name_pattern = r'Standard HDD Managed Disks LRS Storage' # Match the GB meter
         product_name_pattern = r'Standard HDD Managed Disks'
         # Adjust unit requirement for HDD
-        required_unit = 'GB/Month'
+        required_unit = '1 GB/Month' # Corrected unit match
     else:
         logger.warning(f"Could not determine pricing strategy for disk SKU '{sku_name}' (Tier: {disk_tier}). Returning 0.")
         return 0.0
 
     filter_string = " and ".join(filter_parts)
-    items = fetch_retail_prices(filter_string, logger=logger)
+    api_response = fetch_retail_prices(filter_string, logger=logger)
+    items = api_response.get("Items", []) # Extract items safely
 
     if items:
         best_match = find_best_match(
-            items,
-            normalized_location,
+            items=items, # Corrected argument alignment
+            location=normalized_location,
             resource_desc=f"{sku_name} ({disk_tier}) Disk",
-            required_unit = '1 GB/Month' if is_hdd else '1/Month', # Match "1/Month" or "1 GB/Month"
+            required_unit=required_unit, # Use determined required unit
             meter_name_pattern=meter_name_pattern,
             product_name_pattern=product_name_pattern,
-            strict_unit_match=True # Units should be exact for disks
+            strict_unit_match=True, # Units should be exact for disks
+            logger=logger # Pass logger
         )
 
         if best_match:
             # --- Calculate Cost ---
-            monthly_cost, unit_str = estimate_monthly_cost(best_match, logger)
+            monthly_cost, unit_str = estimate_monthly_cost(best_match, logger=logger) # Corrected indentation, pass logger
 
             if monthly_cost is None:
                 logger.error(f"Failed to estimate monthly cost from matched price for disk {sku_name}.")
@@ -503,11 +506,11 @@ def estimate_disk_cost(sku_name: str, size_gb: int, location: str, console: Cons
                     logger.info(f"Estimated Standard HDD cost for {size_gb}GB: {monthly_cost:.6f} {unit_str} * {size_gb} GB = {final_cost:.2f} {best_match.get('currencyCode', 'USD')}/Month")
                     return final_cost
                 else:
-                     logger.error(f"Standard HDD price found, but unit '{unit_str}' was not per GB. Cannot calculate final cost for {sku_name}.")
-                     return 0.0 # Cannot calculate accurately
+                    logger.error(f"Standard HDD price found, but unit '{unit_str}' was not per GB. Cannot calculate final cost for {sku_name}.") # Corrected indentation
+                    return 0.0 # Cannot calculate accurately
             else:
                 # Premium/Standard SSD cost is per disk tier
-                logger.info(f"Estimated Disk cost for {sku_name} ({disk_tier}) in {normalized_location}: {monthly_cost:.2f} {unit_str}")
+                logger.info(f"Estimated Disk cost for {sku_name} ({disk_tier}) in {normalized_location}: {monthly_cost:.2f} {unit_str}") # Corrected indentation
                 return monthly_cost
         else:
             logger.warning(f"Could not find best price match for disk: {sku_name} ({disk_tier}) in {normalized_location}.")
@@ -561,40 +564,44 @@ def estimate_public_ip_cost(sku_name: str, location: str, console: Console = _co
         f"contains(meterName, 'Hour')", # Usually priced per hour
     ]
     if is_basic:
-         filter_parts.append("contains(meterName, 'Basic')")
+        filter_parts.append("contains(meterName, 'Basic')")
     elif is_standard:
-         filter_parts.append("contains(meterName, 'Standard')")
-         if is_global:
-             filter_parts.append("contains(meterName, 'Global')")
+        filter_parts.append("contains(meterName, 'Standard')") # Corrected indentation
+        if is_global:
+            filter_parts.append("contains(meterName, 'Global')")
 
     filter_string = " and ".join(filter_parts)
 
     # Fetch and match prices
-    items = fetch_retail_prices(filter_string, logger=logger)
+    api_response = fetch_retail_prices(filter_string, logger=logger)
+    items = api_response.get("Items", []) # Extract items safely
+
     if items:
         best_match = find_best_match(
-            items,
-            normalized_location,
-            resource_desc,
+            items=items, # Corrected argument alignment
+            location=normalized_location,
+            resource_desc=resource_desc,
             required_unit="Hour", # Expect hourly price
             meter_name_pattern=meter_pattern,
             sku_name_pattern=sku_pattern,
-            strict_unit_match=False # Allow units like '1 Hour', '10 Hour'
+            strict_unit_match=False, # Allow units like '1 Hour', '10 Hour'
+            logger=logger # Pass logger
         )
-        
+
         if best_match:
-            price, _ = estimate_monthly_cost(best_match, logger) # Converts hourly to monthly
+            price, _ = estimate_monthly_cost(best_match, logger=logger) # Converts hourly to monthly, pass logger
             if price is not None:
                 logger.info(f"Estimated monthly cost for {resource_desc}: {price:.2f}")
                 return price
             else:
-                 logger.warning(f"Could not estimate monthly cost from best match for {resource_desc}.")
+                logger.warning(f"Could not estimate monthly cost from best match for {resource_desc}.") # Corrected indentation
         else:
-             logger.warning(f"No matching price item found for {resource_desc} in {normalized_location}. Filter: {filter_string}")
+            logger.warning(f"No matching price item found for {resource_desc} in {normalized_location}. Filter: {filter_string}") # Corrected indentation
     else:
         logger.warning(f"No price items returned for Public IP filter: {filter_string}")
 
-    return 0.0 # Ensure this line has zero leading spaces
+    return 0.0 # Corrected indentation
+
 
 def estimate_snapshot_cost(size_gb: int, location: str, sku_name: Optional[str], console: Console = _console, logger: Optional['Logger'] = None) -> float:
     """Estimates the monthly cost of a Managed Disk Snapshot using the Retail Prices API."""
@@ -612,10 +619,10 @@ def estimate_snapshot_cost(size_gb: int, location: str, sku_name: Optional[str],
     storage_type = "Standard HDD" # Default
     sku_filter_part = "contains(meterName, 'Standard Snapshot')" # Default filter
     if 'premium' in sku_lower:
-        storage_type = "Premium SSD"
+        storage_type = "Premium SSD" # Corrected indentation
         sku_filter_part = "contains(meterName, 'Premium Snapshot')"
     elif 'standardssd' in sku_lower:
-        storage_type = "Standard SSD"
+        storage_type = "Standard SSD" # Corrected indentation
         sku_filter_part = "contains(meterName, 'Standard SSD Snapshot')"
     elif 'standard' in sku_lower: # Handles Standard_LRS and Standard_ZRS (ZRS more expensive)
         storage_type = "Standard HDD"
@@ -633,7 +640,7 @@ def estimate_snapshot_cost(size_gb: int, location: str, sku_name: Optional[str],
     logger.info(f"Estimating cost for {storage_type} Snapshot: size={size_gb}GB, location={normalized_location} (Original: {location})")
     price = 0.0
     resource_desc = f"{storage_type} Snapshot ({size_gb} GB)"
-    required_unit = "GB/Month"
+    required_unit = "1 GB/Month" # More specific match
 
     # Build filter string
     filter_parts = [
@@ -646,49 +653,52 @@ def estimate_snapshot_cost(size_gb: int, location: str, sku_name: Optional[str],
     filter_string = " and ".join(filter_parts)
 
     # Fetch and match prices
-    items = fetch_retail_prices(filter_string, logger=logger)
+    api_response = fetch_retail_prices(filter_string, logger=logger)
+    items = api_response.get("Items", []) # Extract items safely
+
     if items:
         best_match = find_best_match(
-            items,
-            normalized_location,
-            resource_desc,
+            items=items, # Corrected argument alignment
+            location=normalized_location,
+            resource_desc=resource_desc,
             required_unit=required_unit,
-            strict_unit_match=False # Allow '1 GB/Month' etc.
+            strict_unit_match=False, # Allow '1 GB/Month' etc.
+            logger=logger # Pass logger
         )
 
         if best_match:
-            price_per_gb, unit = estimate_monthly_cost(best_match, logger)
+            price_per_gb, unit = estimate_monthly_cost(best_match, logger=logger) # Pass logger
             if price_per_gb is not None and unit and 'gb/month' in unit.lower():
                 monthly_cost = price_per_gb * size_gb
                 logger.info(f"Estimated monthly cost for {resource_desc}: {price_per_gb:.4f} {unit} * {size_gb} GB = {monthly_cost:.2f}/Month")
                 return monthly_cost
             else:
-                 logger.warning(f"Could not estimate monthly cost per GB from best match for {resource_desc}. Price: {best_match.get('retailPrice')}, Unit: {best_match.get('unitOfMeasure')}")
+                logger.warning(f"Could not estimate monthly cost per GB from best match for {resource_desc}. Price: {best_match.get('retailPrice')}, Unit: {best_match.get('unitOfMeasure')}") # Corrected indentation
         else:
-             logger.warning(f"No matching price item found for {resource_desc} in {normalized_location}. Filter: {filter_string}")
+            logger.warning(f"No matching price item found for {resource_desc} in {normalized_location}. Filter: {filter_string}") # Corrected indentation
     else:
         logger.warning(f"No price items returned for Snapshot filter: {filter_string}")
 
-    return 0.0
+    return 0.0 # Corrected indentation
 
 def estimate_app_service_plan_cost(tier: str, size: str, location: str, console: Console = _console, logger: Optional['Logger'] = None) -> float:
     """Estimates monthly cost for an App Service Plan."""
     if not logger: logger = logging.getLogger() # Fallback
     logger.debug(f"Estimating App Service Plan cost for {tier} {size} in {location}")
-    
+
     # Normalize location
-    location = _normalize_location(location, logger)
-    
+    normalized_location = _normalize_location(location, logger) # Use normalized location variable
+
     # Parse possible pricing tier names from the input tier and size
     combined = f"{tier} {size}".lower()
-    
+
     # Initial assumption based on tier + size (ex: Basic B1)
     tier_name = tier.title()
     size_name = size
-    
+
     # Alternative names for tiers to try in case the initial matching fails
     alternative_names = []
-    
+
     # Handle common App Service naming variations
     if tier.lower() == 'standard':
         alternative_names = [
@@ -709,7 +719,7 @@ def estimate_app_service_plan_cost(tier: str, size: str, location: str, console:
             f"{tier_name} Plan",
             f"{tier_name} App Service Plan",
             f"{tier_name} Web App",
-            f"Premium V2", 
+            f"Premium V2",
             f"Premium V3"
         ]
     elif tier.lower() in ['free', 'shared']:
@@ -719,84 +729,96 @@ def estimate_app_service_plan_cost(tier: str, size: str, location: str, console:
             f"{tier_name} Web App",
             f"App Service {tier_name}"
         ]
-    
+
     # Try multiple search approaches
     all_items = []
-    
-    # First attempt: Using tier name in productName and exact sku match
-    filter_string = f"serviceName eq 'App Service' and location eq '{location}'"
+    current_location = normalized_location # Start with normalized location
+
+    # First attempt: Using tier name in productName and exact sku match in the primary location
+    filter_string = f"serviceName eq 'App Service' and armRegionName eq '{current_location}'"
     response = fetch_retail_prices(filter_string, logger=logger)
     all_items = response.get('Items', [])
-    
+
     if not all_items:
-        logger.warning(f"No App Service items found for {location}, trying 'Azure App Service'")
+        logger.debug(f"No App Service items found for {current_location}, trying 'Azure App Service'")
         # Try alternative service name
-        filter_string = f"serviceName eq 'Azure App Service' and location eq '{location}'"
+        filter_string = f"serviceName eq 'Azure App Service' and armRegionName eq '{current_location}'"
         response = fetch_retail_prices(filter_string, logger=logger)
         all_items = response.get('Items', [])
-    
+
     # If still no items, try a fallback region (East US is generally well-supported)
-    if not all_items:
+    if not all_items and current_location != 'East US':
         fallback_location = 'East US'
-        logger.warning(f"No App Service price data for {location}. Trying fallback location: {fallback_location}")
-        
+        logger.warning(f"No App Service price data for {current_location}. Trying fallback location: {fallback_location}")
+        current_location = fallback_location # Use fallback location for subsequent searches
+
         # Try both service names with fallback location
-        filter_string = f"serviceName eq 'App Service' and location eq '{fallback_location}'"
+        filter_string = f"serviceName eq 'App Service' and armRegionName eq '{current_location}'"
         response = fetch_retail_prices(filter_string, logger=logger)
         all_items = response.get('Items', [])
-        
+
         if not all_items:
-            filter_string = f"serviceName eq 'Azure App Service' and location eq '{fallback_location}'"
+            filter_string = f"serviceName eq 'Azure App Service' and armRegionName eq '{current_location}'"
             response = fetch_retail_prices(filter_string, logger=logger)
             all_items = response.get('Items', [])
-    
+
     if all_items:
-        logger.debug(f"Found {len(all_items)} App Service price items, searching for tier {tier_name} and size {size_name}")
-        
+        logger.debug(f"Found {len(all_items)} App Service price items for location '{current_location}', searching for tier {tier_name} and size {size_name}")
+
         # Create SKU pattern from size
         sku_pattern = f"^{re.escape(size_name)}$"
-        
+
         # Try each alternative product name
         best_match = None
-        for product_name in [f"{tier_name} Plan"] + alternative_names:
-            logger.debug(f"Searching for product name: {product_name}")
-            
+        search_names = [f"{tier_name} Plan", f"{tier_name} {size_name}"] + alternative_names
+        for product_name_pattern_search in search_names:
+            logger.debug(f"Searching for product name pattern: '{product_name_pattern_search}', SKU pattern: '{sku_pattern}'")
+
             # Try to find a match with this product name
             match = find_best_match(
-                all_items,
-                location,
-                f"App Service Plan {tier} {size}",
-                required_unit='Month',
-                product_name_pattern=f"{re.escape(product_name)}",
-                sku_name_pattern=sku_pattern
+                items=all_items,
+                location=current_location, # Use the location where items were found
+                resource_desc=f"App Service Plan {tier} {size}",
+                required_unit='Hour', # App Service Plans are usually priced per hour
+                product_name_pattern=re.escape(product_name_pattern_search),
+                sku_name_pattern=sku_pattern,
+                strict_unit_match=False,
+                logger=logger
             )
-            
+
             if match:
                 best_match = match
-                logger.debug(f"Found match with product name '{product_name}'")
+                logger.debug(f"Found match with product name pattern '{product_name_pattern_search}'")
                 break
-        
-        # If no match found with specific product names, try a broader search
+
+        # If no match found with specific product names, try a broader search with just SKU pattern
         if not best_match:
-            logger.debug("Trying broad match with just SKU pattern")
+            logger.debug(f"Trying broad match with just SKU pattern: '{sku_pattern}'")
             best_match = find_best_match(
-                all_items,
-                location,
-                f"App Service Plan {tier} {size}",
-                required_unit='Month',
-                sku_name_pattern=sku_pattern
+                items=all_items,
+                location=current_location,
+                resource_desc=f"App Service Plan {tier} {size}",
+                required_unit='Hour',
+                sku_name_pattern=sku_pattern,
+                strict_unit_match=False,
+                logger=logger
             )
-        
+
         if best_match:
-            return best_match.get('retailPrice', 0.0)
-    
+            monthly_cost, _ = estimate_monthly_cost(best_match, logger=logger)
+            if monthly_cost is not None:
+                logger.info(f"Estimated monthly cost for App Service Plan {tier} {size} in {location} (using data from {current_location}): ${monthly_cost:.2f}/Month")
+                return monthly_cost
+            else:
+                logger.warning(f"Could not calculate monthly cost from matched price for App Service Plan {tier} {size}.")
+
     # If we get here, we couldn't find a price match
-    logger.warning(f"Could not find a price match for App Service Plan {tier} {size} in {location}")
-    
+    logger.warning(f"Could not find a price match for App Service Plan {tier} {size} in {location} (or fallback). Using default estimate.")
+
     # Use default pricing as fallback based on tier and size
     default_price = 0.0
     tier_lower = tier.lower()
-    
+
     # These are conservative estimates based on general Azure pricing (monthly)
     if tier_lower == 'free':
         default_price = 0.0  # Free tier is free
@@ -809,6 +831,8 @@ def estimate_app_service_plan_cost(tier: str, size: str, location: str, console:
             default_price = 111.60  # B2 around $110/month
         elif size.lower() == 'b3':
             default_price = 223.20  # B3 around $220/month
+        else:
+            default_price = 55.80 # Default basic if size unknown
     elif tier_lower == 'standard':
         if size.lower() == 's1':
             default_price = 74.40  # S1 around $75/month
@@ -816,15 +840,22 @@ def estimate_app_service_plan_cost(tier: str, size: str, location: str, console:
             default_price = 148.80  # S2 around $150/month
         elif size.lower() == 's3':
             default_price = 297.60  # S3 around $300/month
+        else:
+            default_price = 74.40 # Default standard if size unknown
     elif tier_lower == 'premium':
         # Premium is more expensive
-        default_price = 146.00  # P1v2 around $146/month as a base estimate
-        if 'v2' in size.lower() or 'v3' in size.lower():
-            # Scale based on size number if available
-            size_match = re.search(r'p(\d+)', size.lower())
-            if size_match:
-                size_num = int(size_match.group(1))
-                default_price = 146.00 * size_num  # Scale based on size number
+        base_premium_price = 146.00 # P1v2 around $146/month as a base estimate
+        size_match = re.search(r'[sp](\d+)', size.lower()) # Match P1, P2, S1, S2 etc.
+        if size_match:
+            size_num = int(size_match.group(1))
+            # Rough scaling based on size number (might not be linear)
+            if 'v2' in size.lower() or 'v3' in size.lower():
+                 # V2/V3 roughly double per size increment?
+                 default_price = base_premium_price * (2**(size_num - 1))
+            else:
+                 default_price = base_premium_price * size_num # Assume linear scaling for older premium
+        else:
+            default_price = base_premium_price # Use base premium if size unknown
 
     logger.info(f"Using fallback price estimate for {tier} {size}: ${default_price:.2f}/month")
     return default_price
@@ -838,13 +869,13 @@ def estimate_sql_database_cost(sku_tier: Optional[str], sku_name: Optional[str],
     normalized_location = _normalize_location(location, logger)
     if not normalized_location:
         logger.error(f"Could not normalize location '{location}' for SQL DB cost estimation.")
-        return 0.0
+        return 0.0 # Corrected indentation
 
     # Normalize inputs
     tier_lower = sku_tier.lower() if sku_tier else ""
     sku_lower = sku_name.lower() if sku_name else ""
     family_lower = family.lower() if family else ""
-    
+
     is_dtu = any(t in tier_lower for t in ['basic', 'standard', 'premium'])
     is_vcore = any(t in tier_lower for t in ['generalpurpose', 'businesscritical', 'hyperscale']) or 'gen' in family_lower
 
@@ -871,24 +902,25 @@ def estimate_sql_database_cost(sku_tier: Optional[str], sku_name: Optional[str],
             f"(contains(meterName, 'DTU') or contains(meterName, '{sku_tier}'))" # Match tier or DTU
         ]
         filter_string = " and ".join(dtu_filter_parts)
-        items = fetch_retail_prices(filter_string, logger=logger)
-        # Add logging for item count
-        item_count = len(items) if items else 0
+        api_response = fetch_retail_prices(filter_string, logger=logger)
+        items = api_response.get("Items", []) # Extract items safely
+        item_count = len(items)
         logger.debug(f"SQL DTU filter '{filter_string}' returned {item_count} items.")
 
         if items:
             best_match = find_best_match(
-                items,
-                normalized_location,
-                resource_desc,
+                items=items, # Corrected argument alignment
+                location=normalized_location,
+                resource_desc=resource_desc,
                 required_unit=required_unit,
                 strict_unit_match=False,
                 meter_name_pattern=f"{sku_tier}|{sku_name}|DTU",
                 product_name_pattern=sku_tier, # Match tier in product name
-                prefer_contains_meter=[sku_name, sku_tier, 'DTU']
+                prefer_contains_meter=[sku_name, sku_tier, 'DTU'],
+                logger=logger # Pass logger
             )
             if best_match:
-                price, unit = estimate_monthly_cost(best_match, logger)
+                price, unit = estimate_monthly_cost(best_match, logger=logger) # Pass logger
                 if price is not None:
                     if unit and 'dtu/month' in unit.lower() and capacity:
                         total_monthly_cost = price * capacity
@@ -909,17 +941,17 @@ def estimate_sql_database_cost(sku_tier: Optional[str], sku_name: Optional[str],
         # 1. Estimate Compute Cost
         compute_desc = f"SQL DB (vCore Compute): {sku_tier} {family} {capacity} vCore"
         vcore_filter_parts = base_filter_parts + [
-             f"contains(meterName, 'vCore')", # Look for vCore pricing
-             f"contains(meterName, 'Hour')", # Usually per vCore hour
-             f"contains(productName, '{sku_tier}')" # e.g., General Purpose - Provisioned
+            f"contains(meterName, 'vCore')", # Look for vCore pricing
+            f"contains(meterName, 'Hour')", # Usually per vCore hour
+            f"contains(productName, '{sku_tier}')" # e.g., General Purpose - Provisioned
         ]
         if family: # Add family if available (e.g., Gen5)
             vcore_filter_parts.append(f"(contains(skuName, '{family}') or contains(meterName, '{family}'))")
-        
+
         filter_string_compute = " and ".join(vcore_filter_parts)
-        compute_items = fetch_retail_prices(filter_string_compute, logger=logger)
-        # Add logging for item count
-        item_count = len(compute_items) if compute_items else 0
+        api_response_compute = fetch_retail_prices(filter_string_compute, logger=logger)
+        compute_items = api_response_compute.get("Items", []) # Extract items safely
+        item_count = len(compute_items)
         logger.debug(f"SQL vCore compute filter '{filter_string_compute}' returned {item_count} items.")
         compute_cost_per_month = 0.0
 
@@ -933,10 +965,11 @@ def estimate_sql_database_cost(sku_tier: Optional[str], sku_name: Optional[str],
                 meter_name_pattern=f"vCore|{family if family else ''}",
                 sku_name_pattern=family if family else None,
                 product_name_pattern=sku_tier,
-                prefer_contains_meter=['vCore', family if family else 'Gen5'] # Prefer Gen5 if family unknown
+                prefer_contains_meter=['vCore', family if family else 'Gen5'], # Prefer Gen5 if family unknown
+                logger=logger # Pass logger
             )
             if best_match_compute:
-                price, _ = estimate_monthly_cost(best_match_compute, logger) # Converts hourly to monthly
+                price, _ = estimate_monthly_cost(best_match_compute, logger=logger) # Converts hourly to monthly, pass logger
                 if price is not None and capacity:
                     compute_cost_per_month = price * capacity # Cost per vCore-hour * hours/month * num vCores
                     logger.info(f"Estimated vCore compute cost for {compute_desc}: {compute_cost_per_month:.2f}/Month")
@@ -944,12 +977,12 @@ def estimate_sql_database_cost(sku_tier: Optional[str], sku_name: Optional[str],
                     compute_cost_per_month = price
                     logger.info(f"Estimated vCore compute cost for {compute_desc} (assuming serverless or single unit): {compute_cost_per_month:.2f}/Month")
                 else:
-                     logger.warning(f"Could not estimate monthly compute cost from best match for {compute_desc}.")
+                    logger.warning(f"Could not estimate monthly compute cost from best match for {compute_desc}.") # Corrected indentation
             else:
-                 logger.warning(f"No matching compute price item found for {compute_desc} in {normalized_location}. Filter: {filter_string_compute}")
+                logger.warning(f"No matching compute price item found for {compute_desc} in {normalized_location}. Filter: {filter_string_compute}") # Corrected indentation
         else:
             logger.warning(f"No price items returned for SQL vCore compute filter: {filter_string_compute}")
-        
+
         total_monthly_cost += compute_cost_per_month
 
         # 2. Estimate Storage Cost (Simplification: Assume general LRS storage for now)
@@ -967,7 +1000,7 @@ def estimate_sql_database_cost(sku_tier: Optional[str], sku_name: Optional[str],
         # total_monthly_cost += storage_cost_per_gb_month * storage_size_gb
 
     else:
-        logger.warning(f"Could not determine model (DTU/vCore) for SQL DB: Tier='{sku_tier}', SKU='{sku_name}', Family='{family}'. Cannot estimate cost.")
+        logger.warning(f"Could not determine model (DTU/vCore) for SQL DB: Tier='{sku_tier}', SKU='{sku_name}', Family='{family}'. Cannot estimate cost.") # Corrected indentation
         return 0.0
 
     return total_monthly_cost
@@ -983,120 +1016,156 @@ def estimate_vm_cost(vm_size: str, location: str, os_type: str = 'Linux', consol
         console: Optional console for output.
 
     Returns:
-        Estimated hourly cost.
+        Estimated hourly cost. Returns 0.0 if estimation fails.
     """
     if not logger: logger = logging.getLogger() # Fallback
     logger.debug(f"Estimating VM cost for {vm_size} ({os_type}) in {location}")
-    
+
     # Normalize location for pricing API
-    location = _normalize_location(location, logger)
-    
+    normalized_location = _normalize_location(location, logger) # Use normalized variable
+    if not normalized_location:
+        logger.error(f"Could not normalize location '{location}' for VM cost estimation.")
+        return 0.0
+
     # Parse the VM size components for more accurate matching
     size_pattern = r'^(?:standard_)?([a-z]+)(\d+)([a-z]*)(?:_v(\d+))?$'
     match = re.match(size_pattern, vm_size.lower())
-    
+
+    size_num_default = 2 # Default CPU count for fallback estimation
     if not match:
-        logger.warning(f"VM size '{vm_size}' doesn't match expected pattern")
-        return 0.0
+        logger.warning(f"VM size '{vm_size}' doesn't match expected pattern, cannot reliably estimate price.")
+        # Attempt to extract number for fallback estimate
+        num_match = re.search(r'\d+', vm_size)
+        if num_match:
+            size_num_default = int(num_match.group(0))
+        # Fallback to a very rough estimate without API call
+        if 'b' in vm_size.lower(): return 0.05 * size_num_default
+        if 'd' in vm_size.lower(): return 0.10 * size_num_default
+        return 0.15 * size_num_default # Generic fallback
 
     # Extract components
-    series_letter, size_num, features, version = match.groups()
+    series_letter, size_num_str, features, version = match.groups()
+    try:
+        size_num = int(size_num_str) if size_num_str else size_num_default
+    except ValueError:
+        size_num = size_num_default
     # Normalize version
     version = version or ""
-    
+
     # Generate possible series names for matching
     possible_series = []
     # Original format: "D Series"
     possible_series.append(f"{series_letter.upper()} Series")
-    
+
     # Alternative formats based on common Azure naming
     if version:
         # "Dv3 Series" format
         possible_series.append(f"{series_letter.upper()}v{version} Series")
         # "D v3 Series" format
         possible_series.append(f"{series_letter.upper()} v{version} Series")
-    
+
     # If B-series, also try "Burstable" in the name
     if series_letter.upper() == 'B':
         possible_series.append("Burstable")
-    
+
     # For VMs with additional features (like 's' for premium storage)
     series_with_features = f"{series_letter.upper()}{features}" if features else series_letter.upper()
     if version:
         possible_series.append(f"{series_with_features}v{version} Series")
-    
+    else:
+         possible_series.append(f"{series_with_features} Series") # Add feature series without version
+
     # Multiple matching attempts with different filters
     all_items = []
-    
-    # Try each possible series name
+    current_location = normalized_location # Use normalized location
+
+    # Try each possible series name in the primary location
     for series_name in possible_series:
-        logger.debug(f"Trying series name: {series_name}")
-        
+        logger.debug(f"Trying series name: '{series_name}' in location '{current_location}'")
+
         # Main filter for standard consumption VM
-        filter_string = f"serviceName eq 'Virtual Machines' and location eq '{location}' and contains(productName, '{series_name}')"
+        filter_parts = [
+            f"serviceName eq 'Virtual Machines'",
+            f"armRegionName eq '{current_location}'",
+            f"priceType eq 'Consumption'",
+            f"contains(productName, '{series_name}')"
+        ]
+        # Add OS filter if not Linux (Linux is often the base name)
         if os_type.lower() != 'linux':
-            filter_string += f" and contains(productName, '{os_type}')"
-        
+            filter_parts.append(f"contains(productName, '{os_type}')")
+
+        filter_string = " and ".join(filter_parts)
+
         response = fetch_retail_prices(filter_string, logger=logger)
         items = response.get('Items', [])
-        
+
         if items:
             logger.debug(f"Found {len(items)} price items using series '{series_name}'")
             all_items.extend(items)
-            break  # Stop trying if we found items
-    
-    # If all series attempts failed, try a broader search just using core VM sizing terms
+            # Optionally break if you trust the first match, or collect all possible matches
+            # break # Stop trying if we found items for this series
+
+    # If all series attempts failed in primary location, try broader search
     if not all_items:
+        logger.debug(f"No specific series match found in '{current_location}'. Trying broader VM search.")
         # Try a more generic filter
-        filter_string = f"serviceName eq 'Virtual Machines' and location eq '{location}'"
+        filter_string = f"serviceName eq 'Virtual Machines' and armRegionName eq '{current_location}' and priceType eq 'Consumption'"
+        if os_type.lower() != 'linux':
+             filter_string += f" and contains(productName, '{os_type}')"
         response = fetch_retail_prices(filter_string, logger=logger)
         all_items = response.get('Items', [])
-        logger.debug(f"Falling back to generic VM filter, found {len(all_items)} items")
-        
-        # If still no items and location is West US 3, try East US as a fallback
-        if not all_items and 'west us 3' in location.lower():
-            fallback_location = 'East US'
-            logger.warning(f"No pricing data for {location}. Trying fallback location: {fallback_location}")
-            fallback_filter = f"serviceName eq 'Virtual Machines' and location eq '{fallback_location}'"
-            fallback_response = fetch_retail_prices(fallback_filter, logger=logger)
-            all_items = fallback_response.get('Items', [])
-            logger.debug(f"Using fallback location {fallback_location}, found {len(all_items)} items")
-    
-    # Extract VM-specific SKU pattern from size
-    sku_pattern = vm_size.replace('Standard_', '').lower()
-    logger.debug(f"VM SKU pattern for matching: {sku_pattern}")
-    
+        logger.debug(f"Generic VM filter in '{current_location}' found {len(all_items)} items")
+
+    # If still no items and location wasn't East US, try East US as a fallback
+    if not all_items and current_location != 'East US':
+        fallback_location = 'East US'
+        logger.warning(f"No pricing data for {current_location}. Trying fallback location: {fallback_location}")
+        current_location = fallback_location # Update current location for the search
+
+        # Try generic filter in fallback location
+        fallback_filter = f"serviceName eq 'Virtual Machines' and armRegionName eq '{current_location}' and priceType eq 'Consumption'"
+        if os_type.lower() != 'linux':
+             fallback_filter += f" and contains(productName, '{os_type}')"
+        fallback_response = fetch_retail_prices(fallback_filter, logger=logger)
+        all_items = fallback_response.get('Items', [])
+        logger.debug(f"Using fallback location {current_location}, found {len(all_items)} items")
+
+    # Exact SKU pattern from the full VM size (e.g., d2s_v3) - remove 'Standard_' prefix if present
+    exact_sku_match_str = vm_size.lower().replace('standard_', '')
+    logger.debug(f"VM exact SKU pattern for matching: {exact_sku_match_str}")
+
     # Safety check - don't call find_best_match with empty items
     if not all_items:
-        logger.warning(f"No pricing data available for VM {vm_size} ({os_type}) in {location}. Using default estimate.")
-        # Return a reasonable default based on size
-        cpu_count = int(size_num) if size_num.isdigit() else 2
-        # Very rough estimate based on size
-        if 'standard_b' in vm_size.lower():  # Burstable
-            return 0.05 * cpu_count  # $0.05 per vCPU for B-series (rough estimate)
-        elif 'standard_d' in vm_size.lower():  # General purpose
-            return 0.10 * cpu_count  # $0.10 per vCPU for D-series (rough estimate)
-        else:
-            return 0.15 * cpu_count  # Default rough estimate
-    
-    # Find best match
+        logger.warning(f"No pricing data available for VM {vm_size} ({os_type}) in {location} or fallback location. Using rough default estimate.")
+        # Return a reasonable default based on size number
+        if 'b' in vm_size.lower(): return 0.05 * size_num # Rough estimate for B-series
+        if 'd' in vm_size.lower(): return 0.10 * size_num # Rough estimate for D-series
+        return 0.15 * size_num # Default rough estimate
+
+    # Find best match using the items found (could be from primary or fallback location)
     best_match = find_best_match(
-        all_items,
-        location,
-        f"VM {vm_size} ({os_type})",
+        items=all_items,
+        location=current_location, # Match against the location where items were found
+        resource_desc=f"VM {vm_size} ({os_type})",
         required_unit='Hour',
-        sku_name_pattern=f"^{re.escape(sku_pattern)}$",
-        prefer_contains_meter=['Compute'],
-        avoid_contains_meter=['Spot', 'Low Priority', 'Reservation'] if os_type.lower() != 'spot' else []
+        required_price_type='Consumption',
+        exact_sku_name=exact_sku_match_str, # Use exact SKU for strong preference
+        prefer_contains_meter=['Compute'], # Prefer meters indicating compute time
+        # Avoid Spot/Low Priority unless explicitly requested (os_type='Spot' could be a convention)
+        avoid_contains_meter=['Spot', 'Low Priority', 'Reservation'] if os_type.lower() != 'spot' else [],
+        logger=logger
     )
-    
+
     if best_match:
-        return best_match.get('retailPrice', 0.0)
-    
-    logger.warning(f"Could not find a price match for VM {vm_size} ({os_type}) in {location}")
-    # Return a reasonable default based on size
-    cpu_count = int(size_num) if size_num.isdigit() else 2
-    return 0.10 * cpu_count  # $0.10 per vCPU (rough estimate)
+        hourly_cost = best_match.get('retailPrice', 0.0)
+        logger.info(f"Estimated hourly cost for VM {vm_size} ({os_type}) in {location} (using data from {current_location}): {hourly_cost:.4f} {best_match.get('currencyCode', 'USD')}/Hour")
+        return hourly_cost
+
+    logger.warning(f"Could not find a suitable price match for VM {vm_size} ({os_type}) in {location} (using data from {current_location}). Using rough default estimate.")
+    # Return a reasonable default based on size number
+    if 'b' in vm_size.lower(): return 0.05 * size_num # Rough estimate for B-series
+    if 'd' in vm_size.lower(): return 0.10 * size_num # Rough estimate for D-series
+    return 0.15 * size_num # Default rough estimate
 
 def estimate_app_gateway_cost(sku_tier: str, sku_name: str, location: str, console: Console = _console, logger: Optional['Logger'] = None) -> float:
     """Estimates the monthly cost of an Azure Application Gateway instance using the Retail Prices API."""
@@ -1119,13 +1188,13 @@ def estimate_app_gateway_cost(sku_tier: str, sku_name: str, location: str, conso
         size_indicator = 'Medium'
     elif 'large' in sku_lower:
         size_indicator = 'Large'
-    
+
     is_v1 = 'v1' in sku_lower or tier_lower == 'standard' or tier_lower == 'waf'
     is_v2 = 'v2' in sku_lower or tier_lower == 'standard_v2' or tier_lower == 'waf_v2'
 
     resource_desc = f"App Gateway: {sku_tier} {sku_name}"
     logger.info(f"Estimating cost for {resource_desc} in {normalized_location} (Original: {location})")
-    
+
     total_monthly_cost = 0.0
 
     # Base filter
@@ -1141,7 +1210,8 @@ def estimate_app_gateway_cost(sku_tier: str, sku_name: str, location: str, conso
     instance_sku_pattern = sku_name
     instance_unit = "Hour"
     prefer_instance_meter = [size_indicator] if size_indicator != sku_name else [sku_name]
-    
+    resource_desc_inst = resource_desc # Default description
+
     if is_v2:
         instance_filter_parts.append("contains(meterName, 'Gateway Hour')") # v2 meter
         instance_filter_parts.append("contains(productName, 'v2')")
@@ -1152,13 +1222,15 @@ def estimate_app_gateway_cost(sku_tier: str, sku_name: str, location: str, conso
         instance_meter_pattern = f"{size_indicator} Gateway"
         resource_desc_inst = f"{resource_desc} ({size_indicator} v1 Instance Hours)"
     else: # Unknown version
-         logger.warning(f"Cannot determine App Gateway version from Tier='{sku_tier}', SKU='{sku_name}'. Skipping instance cost.")
-         instance_filter_parts = None
-         resource_desc_inst = resource_desc
+        logger.warning(f"Cannot determine App Gateway version from Tier='{sku_tier}', SKU='{sku_name}'. Skipping instance cost.") # Corrected indentation
+        instance_filter_parts = None
+        # resource_desc_inst = resource_desc # Already set
 
     if instance_filter_parts:
         filter_string_inst = " and ".join(instance_filter_parts)
-        instance_items = fetch_retail_prices(filter_string_inst, logger=logger)
+        api_response_inst = fetch_retail_prices(filter_string_inst, logger=logger)
+        instance_items = api_response_inst.get("Items", []) # Extract items safely
+
         if instance_items:
             best_match_inst = find_best_match(
                 items=instance_items,
@@ -1168,10 +1240,11 @@ def estimate_app_gateway_cost(sku_tier: str, sku_name: str, location: str, conso
                 strict_unit_match=False,
                 meter_name_pattern=instance_meter_pattern,
                 sku_name_pattern=instance_sku_pattern,
-                prefer_contains_meter=prefer_instance_meter
+                prefer_contains_meter=prefer_instance_meter,
+                logger=logger # Pass logger
             )
             if best_match_inst:
-                price, _ = estimate_monthly_cost(best_match_inst, logger)
+                price, _ = estimate_monthly_cost(best_match_inst, logger=logger) # Pass logger
                 if price is not None:
                     total_monthly_cost += price
                     logger.info(f"Estimated monthly instance cost for {resource_desc_inst}: {price:.2f}")
@@ -1188,7 +1261,9 @@ def estimate_app_gateway_cost(sku_tier: str, sku_name: str, location: str, conso
             "contains(productName, 'v2')"
         ]
         filter_string_cu = " and ".join(cu_filter_parts)
-        cu_items = fetch_retail_prices(filter_string_cu, logger=logger)
+        api_response_cu = fetch_retail_prices(filter_string_cu, logger=logger)
+        cu_items = api_response_cu.get("Items", []) # Extract items safely
+
         if cu_items:
             best_match_cu = find_best_match(
                 items=cu_items,
@@ -1196,10 +1271,11 @@ def estimate_app_gateway_cost(sku_tier: str, sku_name: str, location: str, conso
                 resource_desc=cu_desc,
                 required_unit="Hour",
                 strict_unit_match=False,
-                meter_name_pattern="Capacity Unit Hour"
+                meter_name_pattern="Capacity Unit Hour",
+                logger=logger # Pass logger
             )
             if best_match_cu:
-                price_cu, _ = estimate_monthly_cost(best_match_cu, logger)
+                price_cu, _ = estimate_monthly_cost(best_match_cu, logger=logger) # Pass logger
                 if price_cu is not None:
                     # Assume minimum 1 CU? Cost depends on actual usage/scaling.
                     # For idle cost, estimate cost of 1 CU.
@@ -1207,7 +1283,7 @@ def estimate_app_gateway_cost(sku_tier: str, sku_name: str, location: str, conso
                     logger.info(f"Estimated monthly cost for 1 Capacity Unit hour for {cu_desc}: {price_cu:.2f}")
                     logger.warning("App Gateway v2 cost depends on actual Capacity Units used. Estimating cost for minimum (1 CU). Actual savings may vary.")
                 else:
-                     logger.warning(f"Could not estimate monthly CU cost from best match for {cu_desc}.")
+                    logger.warning(f"Could not estimate monthly CU cost from best match for {cu_desc}.") # Corrected indentation
             else:
                 logger.warning(f"No matching CU price item found for {cu_desc} in {normalized_location}. Filter: {filter_string_cu}")
         else:
@@ -1255,17 +1331,17 @@ def get_cost_data(credential, subscription_id, console: Console = _console, logg
             "type": "ActualCost",
             "timeframe": "Custom",
             "time_period": {
-                "from": start_date.isoformat() + "Z",
-                "to": end_date.isoformat() + "Z"
+                "from": start_date.isoformat(), # Removed Z, API handles it
+                "to": end_date.isoformat()      # Removed Z, API handles it
             },
             "dataset": {
                 "granularity": "None", # Aggregate over the whole period
                 "aggregation": {
-                "totalCost": {
-                    "name": "Cost",
-                    "function": "Sum"
-                }
-            },
+                    "totalCost": {
+                        "name": "Cost",
+                        "function": "Sum"
+                    }
+                },
                 "grouping": [
                     {
                         "type": "Dimension",
@@ -1281,79 +1357,99 @@ def get_cost_data(credential, subscription_id, console: Console = _console, logg
             # Assuming columns are [Cost, Currency, ServiceName, ResourceGroup, UsageDate] - Check API response structure
             # Find indices - safer than hardcoding
             try:
-                cost_idx = query_result.columns.index(next(c for c in query_result.columns if c.name.lower() == 'cost'))
-                currency_idx = query_result.columns.index(next(c for c in query_result.columns if c.name.lower() == 'currency'))
-                service_name_idx = query_result.columns.index(next(c for c in query_result.columns if c.name.lower() == 'servicename'))
+                # Column names can vary slightly or have different casing, check possibilities
+                cost_col_name = next((c.name for c in query_result.columns if c.name.lower() == 'cost' or c.name.lower() == 'costusd'), None)
+                currency_col_name = next((c.name for c in query_result.columns if c.name.lower() == 'currency'), None)
+                service_name_col_name = next((c.name for c in query_result.columns if c.name.lower() == 'servicename'), None)
+
+                if not all([cost_col_name, currency_col_name, service_name_col_name]):
+                    raise ValueError(f"Could not find all required columns. Found: Cost='{cost_col_name}', Currency='{currency_col_name}', ServiceName='{service_name_col_name}'")
+
+                cost_idx = query_result.columns.index(next(c for c in query_result.columns if c.name == cost_col_name))
+                currency_idx = query_result.columns.index(next(c for c in query_result.columns if c.name == currency_col_name))
+                service_name_idx = query_result.columns.index(next(c for c in query_result.columns if c.name == service_name_col_name))
+
             except (StopIteration, ValueError) as e:
-                 logger.error(f"Could not find expected columns (Cost, Currency, ServiceName) in Cost Management API response: {query_result.columns}. Error: {e}")
-                 return {}, 0.0, currency # Return empty if structure is wrong
+                logger.error(f"Could not find expected columns in Cost Management API response. Columns: {[c.name for c in query_result.columns]}. Error: {e}") # Corrected indentation
+                return {}, 0.0, currency # Return empty if structure is wrong
 
             for row in query_result.rows:
-                cost = float(row[cost_idx])
-                currency = row[currency_idx]
+                cost = float(row[cost_idx]) if row[cost_idx] is not None else 0.0
+                # Currency might be null in some rows? Default if needed
+                row_currency = row[currency_idx] if row[currency_idx] else currency
                 service_name = row[service_name_idx]
 
                 if service_name is None: service_name = "Uncategorized" # Handle null service names
 
                 costs_by_type[service_name] = costs_by_type.get(service_name, 0.0) + cost
                 total_cost += cost
-                currency = currency # Assume currency is consistent
+                if row_currency != "N/A": # Update currency if we get a valid one
+                    currency = row_currency
 
-            logger.info(f"Successfully processed cost data. Total Cost: {total_cost:.2f} {currency}. Breakdown by service: {costs_by_type}")
-            
+            logger.info(f"Successfully processed cost data. Total Cost: {total_cost:.2f} {currency}. Breakdown by service: {dict(costs_by_type)}") # Log dict form
+
         else:
-             logger.warning("Cost Management query returned no rows or empty result.")
+            logger.warning("Cost Management query returned no rows or empty result.") # Corrected indentation
 
     except Exception as e:
         logger.error(f"Error fetching cost data from Cost Management API: {e}", exc_info=True)
         # Optionally: Provide a more user-friendly message via console
         console.print(f"  [yellow]Warning:[/yellow] Failed to retrieve detailed cost breakdown from Azure Cost Management API: {e}")
 
-    return costs_by_type, total_cost, currency 
+    return dict(costs_by_type), total_cost, currency # Return dict
 
 def _is_compatible_unit(item_unit: str, required_unit: str, strict_match: bool = False) -> bool:
     """
     Check if a pricing item's unit is compatible with the required unit.
-    
+
     Args:
         item_unit: The unit string from the pricing item
         required_unit: The unit string we're requiring
         strict_match: If True, requires exact case-insensitive match
-        
+
     Returns:
         True if units are compatible, False otherwise
     """
     if not item_unit or not required_unit:
         return False
-        
-    item_unit_lower = item_unit.lower()
-    required_unit_lower = required_unit.lower()
-    
+
+    item_unit_lower = item_unit.lower().strip()
+    required_unit_lower = required_unit.lower().strip()
+
     # Handle exact match case
     if item_unit_lower == required_unit_lower:
         return True
-        
+
     # If strict matching is required, we're done
     if strict_match:
         return False
-    
+
     # Non-strict matching handles common variations and abbreviations
-    
-    # Handle Hour/Hours variations
+
+    # Handle Hour/Hours variations (e.g., "1 Hour", "100 Hours", "/ Hour")
     if required_unit_lower in ('hour', 'hours', 'hr', 'hrs'):
-        return item_unit_lower in ('hour', 'hours', '/hour', '/hours', 'hr', 'hrs', '1 hour', '1 hr')
-        
-    # Handle Month/Months variations
-    if required_unit_lower in ('month', 'months', 'mo', 'mos'):
-        return item_unit_lower in ('month', 'months', '/month', '/months', 'mo', 'mos', '1 month', '1 mo')
-        
-    # Handle GB/Month variations
-    if required_unit_lower in ('gb/month', 'gb-month', 'gb-mo', 'gigabyte month'):
-        return 'gb' in item_unit_lower and ('month' in item_unit_lower or '/mo' in item_unit_lower)
-        
+        # Match variations like "N Hour(s)", "/Hour"
+        return re.match(r"(\d+\s+)?hour(s)?$", item_unit_lower) or item_unit_lower == '/hour'
+
+    # Handle Month/Months variations (e.g., "1/Month", "Month")
+    if required_unit_lower in ('month', 'months', 'mo', 'mos', '1/month'):
+        return re.match(r"(\d+\s+)?month(s)?$", item_unit_lower) or item_unit_lower in ('/month', '1/month')
+
+    # Handle GB/Month variations (e.g., "1 GB/Month", "GB/Month")
+    if required_unit_lower in ('gb/month', 'gb-month', 'gb-mo', 'gigabyte month', '1 gb/month'):
+        # Match "N GB/Month" or "GB/Month"
+        return re.match(r"(\d+\s+)?gb/month$", item_unit_lower) or item_unit_lower == 'gb/month'
+
+    # Handle GB variations (often used for storage/snapshots)
+    if required_unit_lower in ('gb', '1 gb', 'gigabyte'):
+        return re.match(r"(\d+\s+)?gb$", item_unit_lower)
+
     # Handle 10K variations (often used for transaction pricing)
     if required_unit_lower in ('10k', '10,000', 'tenthousand'):
-        return '10' in item_unit_lower and ('thousand' in item_unit_lower or 'k' in item_unit_lower)
-    
-    # For partial matching, check if required unit is contained in item's unit
-    return required_unit_lower in item_unit_lower 
+        # Match "10k", "10 K", "10 Thousand"
+        return re.search(r"10\s*(k|thousand)", item_unit_lower) is not None
+
+    # Fallback: check if required unit is contained within the item's unit (less precise)
+    # e.g., required='Hour', item='Compute Hour' -> True
+    # e.g., required='DTU', item='DTU/Month' -> True
+    return required_unit_lower in item_unit_lower

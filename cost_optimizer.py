@@ -196,7 +196,7 @@ def main():
         'empty_rgs': ['Name', 'Location', 'Recommendation', 'ID'],
         'empty_asps': ['Name', 'Resource Group', 'Location', 'SKU', 'Tier', 'Potential Monthly Savings', 'ID'],
         'old_snapshots': ['Name', 'Resource Group', 'Location', 'Size (GB)', 'SKU', 'Created Date', 'Potential Monthly Savings', 'ID'],
-        'low_cpu_vms': ['Name', 'Resource Group', 'Location', 'VM Size', 'Avg CPU %', 'Potential Monthly Savings', 'Recommendation', 'ID'], # Added Savings
+        'low_cpu_vms': ['Name', 'Resource Group', 'Location', 'OS Type', 'VM Size', 'Avg CPU %', 'Potential Monthly Savings', 'Recommendation', 'ID'], # Added OS Type
         'low_cpu_asps': ['Name', 'Resource Group', 'Location', 'SKU', 'Tier', 'Avg CPU %', 'Potential Monthly Savings', 'Recommendation', 'ID'], # Added Savings
         'low_dtu_dbs': ['Name', 'Resource Group', 'Location', 'SKU', 'Tier', 'Avg DTU %', 'Potential Monthly Savings', 'Recommendation', 'ID'], # Added Savings
         'low_cpu_vcore_dbs': ['Name', 'Resource Group', 'Location', 'SKU', 'Tier', 'Avg CPU %', 'Potential Monthly Savings', 'Recommendation', 'ID'], # Added Savings
@@ -362,6 +362,7 @@ def main():
             item['Tier'] = item.pop('tier', item.get('Tier')) # Keep tier if already exists
             item['IP Address'] = item.pop('ip_address', item.get('IP Address'))
             item['ID'] = item.pop('id', item.get('ID')) # Ensure ID is standardized
+            item['OS Type'] = item.pop('os_type', item.get('OS Type')) # Add mapping for OS Type
 
             processed_findings[key].append(item)
             progress.update(task_savings, advance=1)
